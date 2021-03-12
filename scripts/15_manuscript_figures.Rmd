@@ -1,0 +1,630 @@
+---
+title: "Plot figures for the manuscript"
+author:
+- Shubhayu Bhattacharyay
+- Ari Ercole
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_notebook:
+    toc: yes
+  html_document:
+    toc: yes
+    df_print: paged
+---
+<style type="text/css">
+.main-container {
+max-width: 1800px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+
+## I. Initialization
+
+### Import necessary libraries
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(pROC)
+library(cvAUC)
+library(ggpubr)
+library(ROCR)
+library(pracma)
+library(tidyverse)
+library(MASS)
+library(Hmisc)
+library(reshape2)
+library(caret)
+library(Amelia)
+library(mice)
+library(bestNormalize)
+library(gridExtra)
+library(latex2exp)
+library(UBL)
+library(GGally)
+library(ggpubr)
+library(knitr)
+library(brant)
+library(car)
+library(mlr)
+library(rms)
+library(viridis)
+library(shadowtext)
+library(VIM)
+```
+
+## II. Figure 1: Distributions of numerical and ordinal predictors stratified by GOSE
+
+### (A) Distribution plots (violin and boxplot) of numerical variables
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=2.17}
+# Formatted GOSE labels
+gose.labels <- c("1", "2 or 3", "4", "5", "6", "7", "8")
+
+# Load untransformed, cleaned dataset
+impact.dataframe <- read.csv('../impact_dataframe.csv')
+
+# Pivot IMPACT dataframe into longer dataframe with noncategorical numerical features (including age)
+impact.dataframe.long.noncat <- impact.dataframe %>% filter(is.na(glu) | glu <= 20) %>% pivot_longer(cols = c(age,Hb,glu)) %>% drop_na(value) %>% mutate(GOSE = factor(GOSE, order = TRUE)) %>% mutate(GOSE = plyr::mapvalues(GOSE,from = c("1","3","4","5","6","7","8"), to = gose.labels))
+
+# Violin plots of each noncategorical numeric IMPACT predictor against GOSE outcomes
+violPlots <- ggplot(impact.dataframe.long.noncat, aes(x = GOSE, y = value, fill = GOSE)) +
+  geom_violin(size = .75, 
+              alpha = 0.75,
+              trim = TRUE) +
+  geom_boxplot(width=0.15, 
+               fill="white",
+               outlier.shape = NA) +
+  stat_compare_means(label = "p.signif", 
+                     ref.group = ".all.",
+                     hide.ns = TRUE) +
+  geom_jitter(alpha = 0.15,
+              size = .15) +
+  facet_wrap(~name, 
+             scales = "free_y",
+             strip.position = "left",
+             labeller = as_labeller(c(age = "Age (y)", glu = "Glucose (mmol/L)", Hb = "Hb (g/dL)") ) ) +
+  ylab(NULL) +
+  xlab('GOSE at 6 months post-injury') +
+  theme_classic() +
+  theme(strip.text = element_text(size=20), 
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 16, color = "black"),
+        axis.text.y = element_text(size = 16, color = "black"),
+        axis.title.x = element_text(size = 20),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        strip.placement = "outside",
+        legend.position = "none",
+        aspect.ratio = 1)
+
+print(violPlots)
+```
+
+### (B) Segmented bar plots of categorical variables
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=2.17}
+# Formatted GOSE labels
+gose.labels <- c("1", "2 or 3", "4", "5", "6", "7", "8")
+
+# Load untransformed, cleaned dataset
+impact.dataframe <- read.csv('../impact_dataframe.csv')
+
+# Load and fix IMPACT variable dataframe
+impact.dataframe.long.cat <- read.csv('../impact_dataframe.csv') %>% pivot_longer(cols = c(GCSm,marshall,unreactive_pupils)) %>% drop_na(value) %>% mutate(GOSE = factor(GOSE, order = TRUE)) %>% mutate(GOSE = plyr::mapvalues(GOSE,from = c("1","3","4","5","6","7","8"), to = gose.labels)) %>% group_by(GOSE, name, value) %>% summarise(count = n())
+impact.dataframe.long.cat[impact.dataframe.long.cat$name == 'unreactive_pupils','value']<-impact.dataframe.long.cat[impact.dataframe.long.cat$name == 'unreactive_pupils','value']+1
+
+barPlots <- ggplot(impact.dataframe.long.cat, aes(x = GOSE, y = count, fill = forcats::fct_rev(as.factor(value)))) +
+  geom_bar(stat = "identity",
+           position = "fill") +
+  scale_fill_brewer(palette = "Set2") + 
+    facet_wrap(~name, 
+             scales = "free_y",
+             strip.position = "left",
+             labeller = as_labeller(c(GCSm = "Pr(GCSm)",marshall = "Pr(Marshall CT)", unreactive_pupils = "Pr(Unreactive Pupils)") )) +
+  ylab('Proportion') +
+  xlab('GOSE at 6 months post-injury') +
+  theme_classic() +
+  theme(strip.text = element_text(size=20), 
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 16, color = "black"),
+        axis.text.y = element_text(size = 16, color = "black"),
+        axis.title.x = element_text(size = 20),
+        axis.title.y = element_blank(), 
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        strip.placement = "outside",
+        legend.position = "none",
+        aspect.ratio = 1)
+
+print(barPlots)
+```
+
+## III. Figure 2: True predictor means vs. expected means under the proportional odds assumption
+
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=7.12}
+# Source function to fix IMPACT dataframe
+source('./functions/fix_impact_dataframe.R')
+
+# Source function to calculate proportional odds expectations
+source('./functions/prop_odds_expectations.R')
+
+# Reload IMPACT dataframe
+impact.dataframe <- read.csv('../impact_dataframe.csv') %>% fix.impact.dataframe()
+
+# Formatted GOSE labels
+gose.labels <- c("1", "2 or 3", "4", "5", "6", "7", "8")
+
+# `%notin%` <- Negate(`%in%`)
+# predictor.set <- names(impact.dataframe)[names(impact.dataframe) %notin% c("entity_id","PatientType","GCS","GOSE")]
+# 
+# expect.table <- data.frame(matrix(nrow= 0, ncol = 5))
+# for (i in 1:length(predictor.set)){
+#   curr.pred.name <- predictor.set[i]
+#   curr.x <- impact.dataframe[curr.pred.name]
+#   not.missing.idx <- which(!is.na(curr.x))
+#   non.missing.x <- curr.x[not.missing.idx,1]
+#   non.missing.y <- impact.dataframe$GOSE[not.missing.idx]
+#   if (is.factor(non.missing.x)){
+#     f <- table(non.missing.x)
+#     ncat <- length(f)
+#     if (ncat < 2) {
+#       warning(paste("predictor", curr.pred.name, "only has one level and is ignored"))
+#       next
+#     }
+#     nc <- ncat - 1
+#     cats <- (names(f)[order(-f)])[(ncat-nc+1):ncat]
+#     for (wcat in cats) {
+#       xx <- 1 * (non.missing.x == wcat)
+#       curr.expect <- prop.odds.expectation(xx, non.missing.y)
+#     }
+#   } else {
+#     curr.expect <- prop.odds.expectation(non.missing.x, non.missing.y)
+#   }
+#   curr.expect$predictor <- curr.pred.name
+#   expect.table <- rbind(expect.table, curr.expect)
+#   names(expect.table) <- names(curr.expect) 
+# }
+# expect.table <- expect.table %>% 
+#   mutate(GOSE = factor(GOSE, order = TRUE)) %>% 
+#   mutate(GOSE = plyr::mapvalues(GOSE,from = c("1","3","4","5","6","7","8"), to = gose.labels)) %>%
+#   rowwise() %>% 
+#   mutate(errorMin = max(xmean.y-xsd.y,0), errorMax = xmean.y+xsd.y)
+# 
+# write.csv(expect.table,'../prop_odds_expectations.csv',row.names = FALSE)
+
+expect.table <- read.csv('../prop_odds_expectations.csv') %>%
+    mutate(GOSE = factor(GOSE, order = TRUE)) 
+
+propOddsPlots <- ggplot(expect.table, aes(x = GOSE, group=1)) +
+  geom_line(aes(y = xmean.y), size=1) + 
+  geom_point(aes(y = xmean.y), size=3) +
+  geom_line(aes(y=xmean.y.po),linetype = "dashed", size=1.20) + 
+  facet_wrap(~predictor, 
+             ncol = 3,
+             scales = "free_y",
+             strip.position = "left",
+             labeller = as_labeller(c(age = "Age (y)",
+                                      unreactive_pupils = "Unreactive Pupils",
+                                      hypoxia = "Pr(Hypoxia)",
+                                      hypotension = "Pr(Hypotension)",
+                                      marshall = "Marshall CT",
+                                      tsah = "Pr(tSAH)",
+                                      EDH = "Pr(EDH)",
+                                      hypotension = "Pr(Hypotension)",
+                                      glu = "Glucose (mmol/L)", 
+                                      Hb = "Hb (g/dL)",
+                                      GCSm = "GCSm")))  +
+  ylab(NULL) +
+  xlab('GOSE at 6 months post-injury') +
+  theme_classic()+
+  theme(strip.text = element_text(size=20), 
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 16, color = "black"),
+        axis.text.y = element_text(size = 16, color = "black"),
+        axis.title.x = element_text(size = 20),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size = 2),
+        strip.placement = "outside",
+        aspect.ratio = 1)
+
+plot(propOddsPlots)
+```
+## IV. Figure 3: ROC and PRC per each GOSE score at 6 months post-injury
+
+### Load compiled ROC and PRC axes information (calculated during model evaluation)
+```{r message=FALSE, warning=FALSE}
+
+# Load IMPACT dataframe and calculate class frequencies for PRC reference
+impact.dataframe <- read.csv('../impact_dataframe.csv')
+class.freqs <- as.data.frame(table(impact.dataframe$GOSE)/nrow(impact.dataframe)) %>% rename(class = Var1, class.freq = Freq)
+
+# Load and compile axes for each model type
+mnlr.plot.roc.pcr.axes <- read.csv('../metrics/mnlr_compiled_plot_roc_prc_axes.csv') %>%
+  mutate(Model = 'MNLR')
+
+polr.plot.roc.pcr.axes <- read.csv('../metrics/polr_compiled_plot_roc_prc_axes.csv') %>%
+  mutate(Model = 'POLR')
+
+deepMN.plot.roc.pcr.axes <- read.csv('../metrics/deepMN_compiled_plot_roc_prc_axes.csv') %>%
+  mutate(Model = 'DeepMN')
+
+deepOR.plot.roc.pcr.axes <- read.csv('../metrics/deepOR_compiled_plot_roc_prc_axes.csv') %>%
+  mutate(Model = 'DeepOR')
+
+compiled.plot.roc.pcr.axes <- rbind(mnlr.plot.roc.pcr.axes,polr.plot.roc.pcr.axes,
+                                    deepMN.plot.roc.pcr.axes,deepOR.plot.roc.pcr.axes)
+
+# Repair plot endpoints
+roc.left.endpoint.idx <- which(compiled.plot.roc.pcr.axes$type == 'roc' & compiled.plot.roc.pcr.axes$x == 0)
+roc.right.endpoint.idx <- which(compiled.plot.roc.pcr.axes$type == 'roc' & compiled.plot.roc.pcr.axes$x == 1)
+prc.left.endpoint.idx <- which(compiled.plot.roc.pcr.axes$type == 'prc' & compiled.plot.roc.pcr.axes$x == 0)
+
+compiled.plot.roc.pcr.axes[roc.left.endpoint.idx,c("mean.y","lower.ci.y","upper.ci.y")] <- 0
+compiled.plot.roc.pcr.axes[roc.right.endpoint.idx,c("mean.y","lower.ci.y","upper.ci.y")] <- 1
+compiled.plot.roc.pcr.axes[prc.left.endpoint.idx,c("mean.y","lower.ci.y","upper.ci.y")] <- 1
+
+# Change class integers to GOSE labels
+compiled.plot.roc.pcr.axes <- compiled.plot.roc.pcr.axes %>%
+  mutate(class = as.factor(class)) %>%
+  left_join(class.freqs,by = 'class') %>%
+  mutate(class = plyr::mapvalues(class, 
+                                 from = c(1,3,4,5,6,7,8),
+                                 to = c("GOSE: 1", "GOSE: 2 or 3", "GOSE: 4", "GOSE: 5", "GOSE: 6", "GOSE: 7", "GOSE: 8")))
+
+# Change order of models
+compiled.plot.roc.pcr.axes$Model <- factor(compiled.plot.roc.pcr.axes$Model, levels = c('MNLR','POLR','DeepMN','DeepOR'))
+```
+
+### (A) Receiver operating characteristic (ROC) curves per each GOSE score at 6-mo post-injury
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=3.4}
+roc.curves <- compiled.plot.roc.pcr.axes %>% 
+  filter(type == 'roc') %>%
+  ggplot(aes(x = x)) +
+  facet_wrap( ~ class,
+              scales = 'free',
+              ncol = 4) +
+  xlab("False Positive Rate") +
+  ylab("True Positive Rate") +
+  coord_cartesian(ylim = c(0,1),xlim = c(0,1))+
+  geom_ribbon(aes(ymin = lower.ci.y, ymax = upper.ci.y, fill = Model), alpha = 0.3) +
+  geom_line(aes(y = mean.y, color = Model), alpha = 0.75, size=1.20) +
+  guides(linetype = FALSE, color = guide_legend(nrow = 2)) +
+  geom_segment(x = 0, y = 0, xend = 1, yend = 1,alpha = 0.5,linetype = "dashed",size=1, color = 'gray70')+
+  theme_classic()+
+  theme(
+    strip.text = element_text(size=20), 
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_text(size = 22),
+    axis.title.y = element_text(size = 22),
+    strip.background = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size = 2),
+    legend.position = c(0.85, .25),
+    legend.title = element_text(size=20),
+    legend.text=element_text(size=16),
+    plot.title = element_text(hjust = 0.5),
+    aspect.ratio = 1
+  )
+
+plot(roc.curves)
+```
+
+### (B) Precision-recall (PRC) curves per each GOSE score at 6-mo post-injury
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=3.4}
+prc.curves <- compiled.plot.roc.pcr.axes %>% 
+  filter(type == 'prc') %>%
+  ggplot(aes(x = x)) +
+  facet_wrap( ~ class,
+              scales = 'free',
+              ncol = 4) +
+  xlab("Recall") +
+  ylab("Precision") +
+  coord_cartesian(ylim = c(0,1),xlim = c(0,1))+
+  geom_ribbon(aes(ymin = lower.ci.y, ymax = upper.ci.y, fill = Model), alpha = 0.3) +
+  geom_line(aes(y = mean.y, color = Model), alpha = 0.75, size=1.20) +
+  guides(linetype = FALSE, color = guide_legend(nrow = 2)) +
+  geom_segment(aes(y = class.freq, yend = class.freq),x = 0, xend = 1, alpha = 0.5,linetype = "dashed",size=1, color = 'gray70')+
+  theme_classic()+
+  theme(
+    strip.text = element_text(size=20), 
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_text(size = 22),
+    axis.title.y = element_text(size = 22),
+    strip.background = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size = 2),
+    legend.position = c(0.85, .25),
+    legend.title = element_text(size=20),
+    legend.text=element_text(size=16),
+    plot.title = element_text(hjust = 0.5),
+    aspect.ratio = 1
+  )
+
+plot(prc.curves)
+```
+
+## V. Figure 4: Probability calibration curves per each GOSE score at 6 months post-injury
+
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=3.4}
+# Set GOSE panel labels
+gose.labels <- c("GOSE: 1", "GOSE: 2 or 3", "GOSE: 4", "GOSE: 5", "GOSE: 6", "GOSE: 7", "GOSE: 8")
+# 
+# # Load compiled calibration curves
+# compiled.cal.curves.df <- read.csv('../metrics/compiled_calib_curves.csv') %>%
+#   mutate(class = factor(class)) %>%
+#   mutate(class = plyr::mapvalues(class, from = c(1,3,4,5,6,7,8), to = gose.labels))
+# 
+# # Interpolate calibration curves into common x-axes values
+# interp.cal.curves.df <- data.frame(matrix(ncol = ncol(compiled.cal.curves.df),nrow=0))
+# xq <- seq(from = 0, to = 1, length.out = 21)
+# for (curr.label in unique(compiled.cal.curves.df$class)){
+#   for (curr.bs.idx in unique(compiled.cal.curves.df$bs_idx)){
+#     for (curr.model in unique(compiled.cal.curves.df$Model)){
+#       curr.idx <- which(compiled.cal.curves.df$class == curr.label & compiled.cal.curves.df$bs_idx == curr.bs.idx & compiled.cal.curves.df$Model == curr.model)
+#       if (length(curr.idx) == 0){
+#         next
+#       } else if (length(curr.idx) == 1){
+#         interp.cal.curves.df <- rbind(interp.cal.curves.df, data.frame(prob_pred = xq[which.min(abs(compiled.cal.curves.df$prob_pred[curr.idx] - xq))], prob_true = compiled.cal.curves.df$prob_true[curr.idx], Model = curr.model, bs.idx = curr.bs.idx, class = curr.label))
+#         next
+#       }
+#       interpol.object <- approx(x = compiled.cal.curves.df$prob_pred[curr.idx],y = compiled.cal.curves.df$prob_true[curr.idx],xout = xq)
+#       interp.cal.curves.df <- rbind(interp.cal.curves.df, data.frame(prob_pred = interpol.object$x, prob_true = interpol.object$y, Model = curr.model, bs.idx = curr.bs.idx, class = curr.label))
+#     }
+#   }
+# }
+# # Save interpolated calibration dataframe
+# write.csv(interp.cal.curves.df,'../metrics/interp_compiled_calib_curves.csv')
+# 
+# plot.interp.cal.curves.df <- interp.cal.curves.df %>%
+#   group_by(class, Model, prob_pred) %>%
+#   summarise(mean.y = mean(prob_true,na.rm = TRUE),
+#             lower.ci.y = quantile(prob_true,.025,na.rm = TRUE),
+#             upper.ci.y = quantile(prob_true,.975,na.rm = TRUE))
+# 
+# # Save summarized, interpolated calibration dataframe
+# write.csv(plot.interp.cal.curves.df,'../metrics/plot_interp_compiled_calib_curves.csv')
+
+# Load summary dataframes of interpolated ROC axes
+plot.interp.cal.curves.df <- read.csv('../metrics/plot_interp_compiled_calib_curves.csv')
+
+# Change order of models
+plot.interp.cal.curves.df$Model <- factor(plot.interp.cal.curves.df$Model, levels = c('MNLR','POLR','DeepMN','DeepOR'))
+
+calib.plot <-
+  plot.interp.cal.curves.df %>%
+  ggplot(aes(x = prob_pred)) +
+  facet_wrap( ~ class,
+              scales = 'free',
+              ncol = 4) +
+  xlab("Mean Predicted Probability") +
+  ylab("Fraction of Positives") +
+  geom_ribbon(aes(ymin = lower.ci.y, ymax = upper.ci.y, fill = Model),
+              alpha = 0.3) +
+  guides(linetype = FALSE, color = guide_legend(nrow = 2)) +
+  geom_segment(x = 0, y = 0, xend = 1, yend = 1,alpha = 0.5,linetype = "dashed",size=1, color = 'gray70')+
+  geom_line(aes(y = mean.y, color = Model), alpha = 0.8, size=1.20) +
+  coord_cartesian(ylim = c(0,1),xlim = c(0,1))+
+  theme_classic()+
+  theme(
+    strip.text = element_text(size=22), 
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(size = 12, color = "black"),
+    axis.text.y = element_text(size = 12, color = "black"),
+    axis.title.x = element_text(size = 22),
+    axis.title.y = element_text(size = 22),
+    strip.background = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size = 2),
+    legend.position = c(0.85, .25),
+    legend.title = element_text(size=20),
+    legend.text=element_text(size=16),
+    plot.title = element_text(hjust = 0.5),
+    aspect.ratio = 1
+  )
+
+plot(calib.plot)
+```
+
+## VI. Figure 5: Normalised confusion matrices of each model type
+
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=7.66}
+# Load deepMN confusion matrix axes and average across repeats
+deepMN.cm.values <- read.csv('../metrics/deepMN_confusionMatrices.csv') %>%
+  group_by(true_labels,predicted_labels) %>%
+  summarise(mean_cm_prob = mean(cm_prob), sd_prob = sd(cm_prob)) %>%
+  mutate(Model = 'DeepMN')
+
+# Load deepOR confusion matrix axes and average across repeats
+deepOR.cm.values <- read.csv('../metrics/deepOR_confusionMatrices.csv') %>%
+  group_by(true_labels,predicted_labels) %>%
+  summarise(mean_cm_prob = mean(cm_prob), sd_prob = sd(cm_prob)) %>%
+  mutate(Model = 'DeepOR')
+
+# Load mnlr confusion matrix axes and average across repeats
+mnlr.cm.values <- read.csv('../metrics/mnlr_confusionMatrices.csv') %>%
+  group_by(true_labels,predicted_labels) %>%
+  summarise(mean_cm_prob = mean(cm_prob), sd_prob = sd(cm_prob)) %>%
+  mutate(Model = 'MNLR')
+
+# Load polr confusion matrix axes and average across repeats
+polr.cm.values <- read.csv('../metrics/polr_confusionMatrices.csv') %>%
+  group_by(true_labels,predicted_labels) %>%
+  summarise(mean_cm_prob = mean(cm_prob), sd_prob = sd(cm_prob)) %>%
+  mutate(Model = 'POLR')
+
+# Compile all model types into one dataframe
+compiled.confusion.matrix <- rbind(deepMN.cm.values, deepOR.cm.values, mnlr.cm.values, polr.cm.values)
+compiled.confusion.matrix <- compiled.confusion.matrix %>% mutate(Model = factor(Model, levels = c("MNLR","POLR","DeepMN","DeepOR")),
+                                                                  true_labels = factor(true_labels),
+                                                                  predicted_labels = factor(predicted_labels))
+
+# Plot confusion matrices
+confusionMatrixPlots <- ggplot(compiled.confusion.matrix, aes(x = predicted_labels,y = true_labels,fill = mean_cm_prob))+
+  geom_tile() +
+  geom_shadowtext(aes(label= sprintf("%0.2f",mean_cm_prob)),color="white", size = 6)+
+  scale_fill_viridis(discrete=FALSE,limits=c(0, 1), breaks=seq(0,1,by=0.25)) +
+  guides(fill = guide_colourbar(barwidth = 40,
+                                title = 'Mean proportion of predicted label given true label',
+                                title.position = 'top',
+                                title.hjust = .5)) +
+  ylab(label = "True Labels") +
+  xlab(label = 'Predicted Labels')+
+  scale_y_discrete(limits = rev(levels(compiled.confusion.matrix$true_labels)))+
+  facet_wrap(~Model, nrow = 2, ncol = 2)+
+  theme_classic()+
+  theme(
+    strip.text = element_text(size=22, color = 'black'), 
+    panel.grid.major = element_blank(), 
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(size = 18, color = "black",angle = 45, hjust = 1, vjust = 1),
+    axis.text.y = element_text(size = 18, color = "black",angle = 45, hjust = 1, vjust = 0),
+    axis.title.x = element_text(size = 22),
+    axis.title.y = element_text(size = 22),
+    strip.background = element_blank(),
+    panel.border = element_rect(colour = "black", fill=NA, size = 2),
+    legend.position = 'bottom',
+    legend.title = element_text(size = 18, color = "black"),
+    legend.text=element_text(size=16),
+    aspect.ratio = 1
+  )
+
+plot(confusionMatrixPlots)
+```
+
+## VII. Supplementary Figure 1: Missingness pattern of IMPACT predictor variables in CENTER-TBI
+
+```{r message=FALSE, warning=FALSE, fig.width=5}
+# Load function to fix IMPACT variable types in the dataframe
+source('functions/fix_impact_dataframe.R')
+
+# Load cleaned sample set labels for stratified cross-validation sampling
+impact.dataframe <- read.csv('../impact_dataframe.csv') %>% fix.impact.dataframe()
+
+# Convert pupillary reactivity variable type to integer for imputation
+impact.dataframe$unreactive_pupils <- as.integer(impact.dataframe$unreactive_pupils) - 1
+
+# Remove non-IMPACT predictors
+plot.impact.dataframe <- impact.dataframe %>% dplyr::select(-c(entity_id,PatientType,GCS,GOSE))
+
+# Shorten plot labels to fit
+plt.labels <- names(plot.impact.dataframe)
+plt.labels[1] <- "Age"
+plt.labels[2] <- "P.R."
+plt.labels[5] <- "Glu."
+plt.labels[6] <- "Hypoxia"
+plt.labels[7] <- "HoTN"
+plt.labels[8] <- "Marshall"
+plt.labels[9] <- "tSAH"
+
+# Produce both barplots of missing variables and combinations plot
+miss.aggr <- aggr(plot.impact.dataframe,numbers=TRUE,labels = plt.labels)
+```
+## VII. Supplementary Figure 2: Effect of optimized Box-Cox transformation and standardization on distributions of numerical and ordinal variables
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=4.5}
+# Load function to fix IMPACT variable types in the dataframe
+source('functions/fix_impact_dataframe.R')
+
+# Load IMPACT dataframe and fix variable types
+impact.dataframe <- read.csv('../impact_dataframe.csv') %>% fix.impact.dataframe()
+
+# Identify columns to undergo Box-Cox normalization
+bc.columns <- c('age','GCSm','Hb','glu','marshall')
+
+# # Initialize empty lists to store Box-Cox models and make modifiable copy of dataset
+# bc <- vector(mode = 'list')
+# bc.impact.dataframe <- impact.dataframe
+# copy.impact.dataframe <- impact.dataframe
+# 
+# # Initialize empty list to store ggplot objects
+# bc.plots <- list()
+# # Loop through to-normalize columns
+# for (curr.col in bc.columns){
+#   if (curr.col %in% c('GCSm','marshall')){
+#     copy.impact.dataframe[[curr.col]] <- as.factor(copy.impact.dataframe[[curr.col]])
+#     if (curr.col == 'marshall'){
+#       copy.impact.dataframe[[curr.col]] <- plyr::mapvalues(copy.impact.dataframe[[curr.col]], from = c('1','2','3','4','5','6'), to = c('I','II','III','IV','V','VI'))
+#     }
+#     bc.plots[[paste0(curr.col, '.og.density')]] <- copy.impact.dataframe %>%
+#       drop_na(curr.col) %>%
+#       ggplot(aes_string(x = curr.col)) +
+#       geom_bar(aes(y = ..prop.., group = 1)) +
+#       theme_classic() +
+#       theme(axis.text.x = element_text(size = 16, color = "black"),
+#             axis.text.y = element_text(size = 16, color = "black"),
+#             axis.title.x = element_blank(),
+#             axis.title.y = element_blank(),
+#             panel.border = element_rect(colour = "black", fill=NA, size = 2),
+#             legend.position = "none")
+#   } else {
+#     bc.plots[[paste0(curr.col, '.og.density')]] <- copy.impact.dataframe %>%
+#       drop_na(curr.col) %>%
+#       ggplot(aes_string(x = curr.col)) +
+#       geom_histogram(aes(y =..density..), bins = min(100,length(unique(copy.impact.dataframe[[curr.col]]))) ) +
+#       theme_classic() +
+#       theme(axis.text.x = element_text(size = 16, color = "black"),
+#             axis.text.y = element_text(size = 16, color = "black"),
+#             axis.title.x = element_blank(),
+#             axis.title.y = element_blank(),
+#             panel.border = element_rect(colour = "black", fill=NA, size = 2),
+#             legend.position = "none")
+#   }
+#   # First, plot original density of current numeric variable
+# 
+#   # Transform current numeric variable and store transformed variable
+#   bc[[curr.col]] <- boxcox(impact.dataframe[[curr.col]],
+#                            standardize = TRUE)
+#   bc.impact.dataframe[, curr.col] <- bc[[curr.col]]$x.t
+#   curr.shapiro.test <- shapiro.test(bc.impact.dataframe[[curr.col]])
+# 
+#   # Second, plot transformed density of current numeric variable
+#   bc.plots[[paste0(curr.col, '.tf.density')]] <- ggplot(bc.impact.dataframe, aes_string(x = curr.col)) +
+#     geom_density() +
+#     theme_classic() +
+#     theme(axis.text.x = element_text(size = 16, color = "black"),
+#           axis.text.y = element_text(size = 16, color = "black"),
+#           axis.title.x = element_blank(),
+#           axis.title.y = element_blank(),
+#           panel.border = element_rect(colour = "black", fill=NA, size = 2),
+#           legend.position = "none")
+#   # Third, plot normal q-q plot of transformed numeric variable
+#   bc.plots[[paste0(curr.col, '.tf.normqq')]] <- ggplot(bc.impact.dataframe, aes_string(sample = curr.col)) +
+#     stat_qq() +
+#     stat_qq_line() +
+#     theme_classic() +
+#     theme(axis.text.x = element_text(size = 16, color = "black"),
+#           axis.text.y = element_text(size = 16, color = "black"),
+#           axis.title.x = element_blank(),
+#           axis.title.y = element_blank(),
+#           panel.border = element_rect(colour = "black", fill=NA, size = 2),
+#           legend.position = "none")
+#   # Fourth, plot the transformation (Box-Cox) function of the current numeric variable
+#   xx <- seq(min(impact.dataframe[[curr.col]],na.rm = TRUE), max(impact.dataframe[[curr.col]],na.rm = TRUE), length = 500)
+#   yy <- predict(bc[[curr.col]],newdata = xx)
+#   xrng <- range(xx)
+#   yrng <- range(yy)
+#   curr.tf.df <- data.frame(xx,yy)
+#   bc.plots[[paste0(curr.col,'.tf.function')]] <- ggplot(curr.tf.df,aes(xx,yy)) +
+#     geom_line() +
+#     theme_classic() +
+#     theme(axis.text.x = element_text(size = 16, color = "black"),
+#           axis.text.y = element_text(size = 16, color = "black"),
+#           axis.title.x = element_blank(),
+#           axis.title.y = element_blank(),
+#           panel.border = element_rect(colour = "black", fill=NA, size = 2),
+#           legend.position = "none") 
+#     # annotate("text", x=xrng[2], y=yrng[1], label=TeX(sprintf("$\\lambda = %0.2f$", bc[[curr.col]]$lambda)),hjust = 1, vjust = 0, size = 8)
+# }
+# # Save Box-Cox plots object:
+# saveRDS(bc.plots,'../box_cox_plots.rds')
+
+# Load Box-Cox plots object:
+bc.plots <-readRDS('../box_cox_plots.rds')
+do.call("grid.arrange",c(bc.plots,nrow=length(bc.columns),ncol=4))
+
+print('Y-axis labels (Top-to-bottom): Age, GCSm, Hb, Glucose, Marshall CT')
+print('X-axis labels (Left-to-Right): Original Density, Transformed Density, Transformed Density, Transformed Q-Q, Transformation Function')
+```

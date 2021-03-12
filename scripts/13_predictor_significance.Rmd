@@ -1,0 +1,235 @@
+---
+title: "Examination of Feature Significance in IMPACT prediction models"
+author: 
+- Shubhayu Bhattacharyay
+- Ari Ercole
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+---
+<style type="text/css">
+.main-container {
+max-width: 1800px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+
+## I. Initialization
+
+### Import necessary libraries
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(shapper)
+library(matrixStats)
+library(nnet)
+library(MASS)
+```
+
+## II. Load trained logistic regression models and extract coefficients and associated p-values
+
+### Load trained logistic regression models and extract coefficients and associated p-values
+```{r eval=TRUE, message=FALSE, warning=FALSE}
+# Load testing folds for repeated CV
+testing.folds <- readRDS('../testing_folds.rds')
+
+# Identify list of existing repeat directories
+repeat.dirs <- list.files('../repeated_cv',pattern = 'Repeat*',include.dirs = TRUE,full.names = TRUE)
+repeat.dirs <- repeat.dirs[ file.info(repeat.dirs)$isdir ]
+
+# Initialize empty dataframes to store coefficients for the different logistic regression model types
+mnlr.coeffs.df <- as.data.frame(matrix(ncol = 7,nrow = 0))
+polr.coeffs.df <- as.data.frame(matrix(ncol = 6,nrow = 0))
+mnlr.smote.coeffs.df <- as.data.frame(matrix(ncol = 7,nrow = 0))
+polr.smote.coeffs.df <- as.data.frame(matrix(ncol = 6,nrow = 0))
+
+# Loop through repeat directories and store relevant information
+for (i in 1:length(repeat.dirs)){
+  # Identify list of existing fold directories
+  fold.dirs <- list.files(repeat.dirs[i],pattern = 'Fold*',include.dirs = TRUE,full.names = TRUE)
+  fold.dirs <- fold.dirs[ file.info(fold.dirs)$isdir ]
+  # Loop through folds
+  for (j in 1:length(fold.dirs)){
+    curr.fold.folder <- fold.dirs[j]
+    # Load logistic regression model files for current repeat and fold
+    curr.mnlr <- readRDS(file.path(curr.fold.folder,'trained_models/mnlr_mdl.rds'))
+    curr.mnlr.smote <- readRDS(file.path(curr.fold.folder,'trained_models/mnlr_mdl.rds'))
+    curr.polr <- readRDS(file.path(curr.fold.folder,'trained_models/polr_mdl.rds'))
+    curr.polr.smote <- readRDS(file.path(curr.fold.folder,'trained_models/polr_mdl.rds'))
+    
+    # Extract coefficients from current MNLR model
+    curr.mnlr.coeff.df <- full_join(as.data.frame(summary(curr.mnlr)$coefficients) %>% 
+                                      mutate(GOSE = rownames(.)) %>% 
+                                      pivot_longer(cols = !GOSE,names_to = 'predictor',values_to = 'coeff'),
+                                    as.data.frame(summary(curr.mnlr)$standard.errors) %>% 
+                                      mutate(GOSE = rownames(.)) %>% 
+                                      pivot_longer(cols = !GOSE,names_to = 'predictor',values_to = 'coeff.std'),by = c('predictor', 'GOSE')) %>%
+      full_join(.,as.data.frame(curr.mnlr$p.values) %>% 
+                  mutate(GOSE = rownames(.)) %>% 
+                  pivot_longer(cols = !GOSE,names_to = 'predictor',values_to = 'coeff.p.val'),by = c('predictor', 'GOSE')) %>%
+      mutate(repeat.idx = i, fold.idx = j)
+    
+    # Extract coefficients from current MNLR with SMOTE model
+    curr.mnlr.smote.coeff.df <- full_join(as.data.frame(summary(curr.mnlr.smote)$coefficients) %>% 
+                                      mutate(GOSE = rownames(.)) %>% 
+                                      pivot_longer(cols = !GOSE,names_to = 'predictor',values_to = 'coeff'),
+                                    as.data.frame(summary(curr.mnlr.smote)$standard.errors) %>% 
+                                      mutate(GOSE = rownames(.)) %>% 
+                                      pivot_longer(cols = !GOSE,names_to = 'predictor',values_to = 'coeff.std'),by = c('predictor', 'GOSE')) %>%
+      full_join(.,as.data.frame(curr.mnlr.smote$p.values) %>% 
+                  mutate(GOSE = rownames(.)) %>% 
+                  pivot_longer(cols = !GOSE,names_to = 'predictor',values_to = 'coeff.p.val'),by = c('predictor', 'GOSE')) %>%
+      mutate(repeat.idx = i, fold.idx = j)
+    
+    # Extract coefficients from current POLR model
+    curr.polr.coeff.df <- data.frame(predictor = names(summary(curr.polr)$coefficients[,1]), 
+                                     coeff = summary(curr.polr)$coefficients[,1], 
+                                     coeff.std = summary(curr.polr)$coefficients[,2],
+                                     coeff.p.val = pnorm(abs(summary(curr.polr)$coefficients[,3]), lower.tail = FALSE) * 2) %>%
+      mutate(repeat.idx = i, fold.idx = j)
+    
+    # Extract coefficients from current POLR with SMOTE model
+    curr.polr.smote.coeff.df <- data.frame(predictor = names(summary(curr.polr.smote)$coefficients[,1]), 
+                                     coeff = summary(curr.polr.smote)$coefficients[,1], 
+                                     coeff.std = summary(curr.polr.smote)$coefficients[,2],
+                                     coeff.p.val = pnorm(abs(summary(curr.polr.smote)$coefficients[,3]), lower.tail = FALSE) * 2) %>%
+      mutate(repeat.idx = i, fold.idx = j)
+    
+    # Append current model coefficients to the compiled dataframes
+    mnlr.coeffs.df <- rbind(mnlr.coeffs.df,curr.mnlr.coeff.df)
+    mnlr.smote.coeffs.df <- rbind(mnlr.smote.coeffs.df,curr.mnlr.smote.coeff.df)
+    polr.coeffs.df <- rbind(polr.coeffs.df,curr.polr.coeff.df)
+    polr.smote.coeffs.df <- rbind(polr.smote.coeffs.df,curr.polr.smote.coeff.df)
+  }
+}
+
+# Save compiled coefficient dataframes
+write.csv(mnlr.coeffs.df,'../repeated_cv/compiled_coefficients/mnlr_coefficients.csv',row.names = FALSE)
+write.csv(mnlr.smote.coeffs.df,'../repeated_cv/compiled_coefficients/mnlr_smote_coefficients.csv',row.names = FALSE)
+write.csv(polr.coeffs.df,'../repeated_cv/compiled_coefficients/polr_coefficients.csv',row.names = FALSE)
+write.csv(polr.smote.coeffs.df,'../repeated_cv/compiled_coefficients/polr_smote_coefficients.csv',row.names = FALSE)
+```
+
+### Load compiled coefficient values from MNLR and POLR and group by clustering variables
+```{r eval=TRUE, message=FALSE, warning=FALSE}
+options(digits=22)
+
+# Load compiled coefficient dataframes
+mnlr.coeffs.df <- read.csv('../repeated_cv/compiled_coefficients/mnlr_coefficients.csv') 
+mnlr.coeffs.df$coeff.p.val[mnlr.coeffs.df$coeff.p.val == 0] = .Machine$double.eps
+mnlr.coeffs.df <- mutate(mnlr.coeffs.df, z.norm = qnorm(coeff.p.val, lower.tail=FALSE))
+
+mnlr.smote.coeffs.df <- read.csv('../repeated_cv/compiled_coefficients/mnlr_smote_coefficients.csv') 
+mnlr.smote.coeffs.df$coeff.p.val[mnlr.smote.coeffs.df$coeff.p.val == 0] = .Machine$double.eps
+mnlr.smote.coeffs.df <- mutate(mnlr.smote.coeffs.df, z.norm = qnorm(coeff.p.val, lower.tail=FALSE))
+
+polr.coeffs.df <- read.csv('../repeated_cv/compiled_coefficients/polr_coefficients.csv') %>% 
+  mutate(z.norm = qnorm(coeff.p.val, lower.tail=FALSE))
+
+polr.smote.coeffs.df <- read.csv('../repeated_cv/compiled_coefficients/polr_smote_coefficients.csv') %>% 
+  mutate(z.norm = qnorm(coeff.p.val, lower.tail=FALSE))
+
+# Group MNLR coefficients by predictor
+grouped.mnlr.coeffs.df <- mnlr.coeffs.df %>% group_by(GOSE,predictor) %>% 
+  summarise(meanCoeff = mean(abs(coeff)), 
+            sdCoeff = sqrt((1/n())*sum(coeff.std^2) +((n()+1)/(n()))*(sd(abs(coeff))^2)), 
+            mean.p.value = mean(coeff.p.val),
+            std.p.value = sd(coeff.p.val),
+            mean.z.norm = mean(z.norm),
+            var.z.norm = 1 + (1 + (1/n()))*var(z.norm),
+            r.m = (1 + (1/n()))*var(z.norm),
+            m = n()) %>%
+  mutate(d.o.f. = (m-1)*((1 + (1/r.m))^2)) %>%
+  mutate(p.m = pt(q = mean.z.norm, df = d.o.f., lower.tail = FALSE)) %>%
+  mutate(formatted = sprintf("%.2f (%.2f)",abs(meanCoeff),sdCoeff), p.value.imp = sprintf("%.2f",p.m))
+
+# Group POLR coefficients by predictor
+grouped.polr.coeffs.df <- polr.coeffs.df %>% 
+  group_by(predictor) %>% 
+  summarise(meanCoeff = mean(abs(coeff)), 
+            sdCoeff = sqrt((1/n())*sum(coeff.std^2) +((n()+1)/(n()))*(sd(abs(coeff))^2)), 
+            mean.p.value = mean(coeff.p.val),
+            std.p.value = sd(coeff.p.val),
+            mean.z.norm = mean(z.norm),
+            var.z.norm = 1 + (1 + (1/n()))*var(z.norm),
+            r.m = (1 + (1/n()))*var(z.norm),
+            m = n()) %>%
+  mutate(d.o.f. = (m-1)*((1 + (1/r.m))^2)) %>%
+  mutate(p.m = pt(q = mean.z.norm, df = d.o.f., lower.tail = FALSE)) %>%
+  mutate(formatted = sprintf("%.2f (%.2f)",abs(meanCoeff),sdCoeff), p.value.imp = sprintf("%.2f",p.m))
+
+# Group signficant MNLR coefficients by predictors
+pred.group.mnlr.coeffs.df <- grouped.mnlr.coeffs.df %>% group_by(predictor) %>% summarise(absMeanMeanCoeff = (mean(abs(meanCoeff))), sdMeanCoeff = sqrt((1/n())*sum(sdCoeff^2) +((n()+1)/(n()))*(sd(abs(meanCoeff))^2)))%>%
+  mutate(formatted = sprintf("%.2f (%.2f)",absMeanMeanCoeff,sdMeanCoeff))
+
+non.significant.mnlr.coeffs.df <- grouped.mnlr.coeffs.df %>% filter(p.m > 0.05)
+significant.mnlr.coeffs.df <- grouped.mnlr.coeffs.df %>% filter(p.m <= 0.05)
+```
+
+### Load SHAP values from DeepMN and DeepOR and group by clustering variables
+```{r eval=TRUE, message=FALSE, warning=FALSE}
+# Load compiled SHAP values from DeepMN and DeepOR models
+deepMN.shap <- read.csv('../repeated_cv/compiled_shap_values/deepMN_shap_values.csv') %>% 
+  pivot_longer(cols = !c(node,repeat.name,fold.name,tune.idx),names_to = "predictor", values_to = "SHAP")
+deepOR.shap <- read.csv('../repeated_cv/compiled_shap_values/deepOR_shap_values.csv') %>% 
+  pivot_longer(cols = !c(node,repeat.name,fold.name,tune.idx),names_to = "predictor", values_to = "SHAP")
+
+# Group SHAP values by output node and tuning idx
+grouped.deepMN.shap <- deepMN.shap %>% 
+  group_by(node,tune.idx,predictor) %>% 
+  summarise(meanAbsSHAP = mean(abs(SHAP)), sdAbsSHAP = sd(abs(SHAP)),medianAbsSHAP = median(abs(SHAP)), lowerCIAbsSHAP = quantile(abs(SHAP),.25), upperCIAbsSHAP = quantile(abs(SHAP),.75)) %>%
+  mutate(formatted = sprintf("%.2f (%.2f)",meanAbsSHAP,sdAbsSHAP)) %>%
+  filter(tune.idx == 82) %>%
+  pivot_wider(id_cols = predictor, names_from = node, values_from = formatted)
+
+grouped.deepOR.shap <- deepOR.shap %>% 
+  group_by(node,tune.idx,predictor) %>% 
+  summarise(meanAbsSHAP = mean(abs(SHAP)), sdAbsSHAP = sd(abs(SHAP)),medianAbsSHAP = median(abs(SHAP)), lowerCIAbsSHAP = quantile(abs(SHAP),.25), upperCIAbsSHAP = quantile(abs(SHAP),.75)) %>%
+  mutate(formatted = sprintf("%.2f (%.2f)",meanAbsSHAP,sdAbsSHAP)) %>%
+  filter(tune.idx == 92) %>%
+  pivot_wider(id_cols = predictor, names_from = node, values_from = formatted)
+
+options(digits=5)
+greater.wx.test <- pairwise.wilcox.test(deepMN.shap$SHAP, deepMN.shap$predictor,p.adjust.method = "BH",paired = TRUE,alternative = 'greater')
+lesser.wx.test <- pairwise.wilcox.test(deepMN.shap$SHAP, deepMN.shap$predictor,p.adjust.method = "BH",paired = TRUE,alternative = 'less')
+two.sided.wx.test <- pairwise.wilcox.test(deepMN.shap$SHAP, deepMN.shap$predictor,p.adjust.method = "BH",paired = TRUE)
+
+temp.df.1 <- as.data.frame(greater.wx.test$p.value)
+temp.df.1$first.class <- rownames(temp.df.1)
+temp.df.1 <- temp.df.1 %>% pivot_longer(cols = -first.class, names_to = 'second.class',values_to = 'p.value') %>% 
+  drop_na(p.value) %>% mutate(test = 'greater')
+
+temp.df.2 <- as.data.frame(lesser.wx.test$p.value)
+temp.df.2$first.class <- rownames(temp.df.2)
+temp.df.2 <- temp.df.2 %>% pivot_longer(cols = -first.class, names_to = 'second.class',values_to = 'p.value') %>% 
+  drop_na(p.value) %>% mutate(test = 'less')
+
+temp.df.3 <- as.data.frame(two.sided.wx.test$p.value)
+temp.df.3$first.class <- rownames(temp.df.3)
+temp.df.3 <- temp.df.3 %>% pivot_longer(cols = -first.class, names_to = 'second.class',values_to = 'p.value') %>% 
+  drop_na(p.value) %>% mutate(test = 'two.tailed')
+
+deepOR.greater.wx.test <- pairwise.wilcox.test(deepOR.shap$SHAP, deepOR.shap$predictor,p.adjust.method = "BH",paired = TRUE,alternative = 'greater')
+deepOR.lesser.wx.test <- pairwise.wilcox.test(deepOR.shap$SHAP, deepOR.shap$predictor,p.adjust.method = "BH",paired = TRUE,alternative = 'less')
+deepOR.two.sided.wx.test <- pairwise.wilcox.test(deepOR.shap$SHAP, deepOR.shap$predictor,p.adjust.method = "BH",paired = TRUE)
+
+deepOR.temp.df.1 <- as.data.frame(deepOR.greater.wx.test$p.value)
+deepOR.temp.df.1$first.class <- rownames(deepOR.temp.df.1)
+deepOR.temp.df.1 <- deepOR.temp.df.1 %>% pivot_longer(cols = -first.class, names_to = 'second.class',values_to = 'p.value') %>% 
+  drop_na(p.value) %>% mutate(test = 'greater')
+
+deepOR.temp.df.2 <- as.data.frame(deepOR.lesser.wx.test$p.value)
+deepOR.temp.df.2$first.class <- rownames(deepOR.temp.df.2)
+deepOR.temp.df.2 <- deepOR.temp.df.2 %>% pivot_longer(cols = -first.class, names_to = 'second.class',values_to = 'p.value') %>% 
+  drop_na(p.value) %>% mutate(test = 'less')
+
+deepOR.temp.df.3 <- as.data.frame(deepOR.two.sided.wx.test$p.value)
+deepOR.temp.df.3$first.class <- rownames(deepOR.temp.df.3)
+deepOR.temp.df.3 <- deepOR.temp.df.3 %>% pivot_longer(cols = -first.class, names_to = 'second.class',values_to = 'p.value') %>% 
+  drop_na(p.value) %>% mutate(test = 'two.tailed')
+```

@@ -1,0 +1,95 @@
+---
+title: "Plot metrics of models trained on IMPACT variables across imputations"
+author:
+- Shubhayu Bhattacharyay
+- Ari Ercole
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+---
+<style type="text/css">
+.main-container {
+max-width: 1800px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+
+## I. Initialization
+
+### Import necessary libraries
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(ggpubr)
+library(viridis)
+library(shadowtext)
+```
+
+## II. Calculate compiled metrics and area under the curves (AUCs)
+
+### Load and compile bias-corrected bootstrapped metrics of each model
+```{r message=FALSE, warning=FALSE}
+# Load compiled metric dataframes
+mnlr.compiled.metrics <- read.csv('../metrics/mnlr_compiled_metrics.csv') %>% 
+  rename(tune_idx = opt.SMOTE,bs.idx = bootstrap.idx) %>% mutate(Model = 'MNLR')
+polr.compiled.metrics <- read.csv('../metrics/polr_compiled_metrics.csv') %>% 
+  rename(tune_idx = opt.SMOTE,bs.idx = bootstrap.idx) %>% mutate(Model = 'POLR')
+deepMN.compiled.metrics <- read.csv('../metrics/deepMN_compiled_metrics.csv') %>% mutate(Model = 'DeepMN')
+deepOR.compiled.metrics <- read.csv('../metrics/deepOR_compiled_metrics.csv') %>% mutate(Model = 'DeepOR')
+
+compiled.metrics <- rbind(mnlr.compiled.metrics,polr.compiled.metrics,
+                       deepMN.compiled.metrics,deepOR.compiled.metrics)
+
+# Change order of models
+compiled.metrics$Model <- factor(compiled.metrics$Model, levels = c('MNLR','POLR','DeepMN','DeepOR'))
+
+summarized.metrics <- compiled.metrics %>% 
+  group_by(metric,class,Model) %>%
+  summarise(metric.value = mean(value),
+            lower.ci.value = quantile(value,.025),
+            upper.ci.value = quantile(value,.975),
+  ) %>% 
+  rowwise() %>% 
+  mutate(formatted = sprintf("%.2f (%.2f-%.2f)",metric.value,lower.ci.value,upper.ci.value))
+
+# Produce table of metrics and associated confidence interval of each model type
+knitr::kable(summarized.metrics)
+```
+
+### Load and compile bias-corrected bootstrapped AUCs of each model
+```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=7.66}
+# Establish GOSE labels for panel titles
+gose.labels <- c("GOSE: 1", "GOSE: 2 or 3", "GOSE: 4", "GOSE: 5", "GOSE: 6", "GOSE: 7", "GOSE: 8")
+
+# Load compiled AUROC and AUPRC dataframes
+mnlr.compiled.aucs <- read.csv('../metrics/mnlr_compiled_aucs.csv') %>% rename(tune_idx = opt.SMOTE) %>% mutate(Model = 'MNLR')
+polr.compiled.aucs <- read.csv('../metrics/polr_compiled_aucs.csv') %>% rename(tune_idx = opt.SMOTE) %>% mutate(Model = 'POLR')
+deepMN.compiled.aucs <- read.csv('../metrics/deepMN_compiled_aucs.csv') %>% mutate(Model = 'DeepMN')
+deepOR.compiled.aucs <- read.csv('../metrics/deepOR_compiled_aucs.csv') %>% mutate(Model = 'DeepOR')
+
+compiled.aucs <- rbind(mnlr.compiled.aucs,polr.compiled.aucs,
+                       deepMN.compiled.aucs,deepOR.compiled.aucs)
+
+# Change order of models
+compiled.aucs$Model <- factor(compiled.aucs$Model, levels = c('MNLR','POLR','DeepMN','DeepOR'))
+
+summarized.aucs <- compiled.aucs %>% 
+  group_by(type,class,Model) %>%
+  summarise(metric.value = mean(value),
+            lower.ci.value = quantile(value,.025),
+            upper.ci.value = quantile(value,.975),
+  ) %>% 
+  rowwise() %>% 
+  mutate(formatted = sprintf("%.2f (%.2f-%.2f)",metric.value,lower.ci.value,upper.ci.value))
+
+summarized.aurocs <- summarized.aucs %>% filter(type == 'auroc')
+summarized.auprcs <- summarized.aucs %>% filter(type == 'auprc')
+
+# Produce table of AUCs and associated confidence interval of each model type
+knitr::kable(summarized.aucs)
+```

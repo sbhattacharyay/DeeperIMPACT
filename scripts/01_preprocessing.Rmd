@@ -1,0 +1,233 @@
+---
+title: "Preprocessing of CENTER-TBI dataset"
+author:
+- Shubhayu Bhattacharyay
+- Ari Ercole
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_notebook:
+    toc: yes
+  html_document:
+    toc: yes
+    df_print: paged
+---
+<style type="text/css">
+.main-container {
+max-width: 1800px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+
+## I. Initialization
+
+### Import necessary libraries
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(bestNormalize)
+library(gridExtra)
+library(latex2exp)
+library(caret)
+```
+
+### Load data files
+```{r message=FALSE}
+# List directories of CENTER-TBI datasets
+center.TBI.folders <- list.files('../../CENTER-TBI',include.dirs = TRUE)
+
+# Initialize empty lists to store data files
+TBI.dataframes <- vector(mode = 'list')
+var.lists <- vector(mode = 'list')
+
+# Store all CSVs in the lists
+for (i in 1:length(center.TBI.folders)){
+  curr.folder <- center.TBI.folders[i]
+  var.lists[[curr.folder]] <- read.csv(file.path('../../CENTER-TBI',curr.folder,'variables.csv'))
+  TBI.dataframes[[curr.folder]] <- read.csv(file.path('../../CENTER-TBI',curr.folder,'data.csv'))
+}
+
+# Isolate IMPACT dataset
+impact.dataframe <- TBI.dataframes$sb2406_IMPACT
+```
+
+## II. Preprocessing
+### Clean CENTER-TBI dataset
+```{r message=FALSE}
+# Load function to fix IMPACT variable types in the dataframe
+source('functions/fix_impact_dataframe.R')
+
+# Drop rows with NA GOSE scores
+impact.dataframe <- drop_na(impact.dataframe,GOSE)
+
+# Drop unused columns during imputation
+impact.dataframe <- dplyr::select(impact.dataframe,-SiteCode)
+
+# Fix variable types of IMPACT dataframe
+impact.dataframe <- fix.impact.dataframe(impact.dataframe)
+
+# Correct erroneous Hemoglobin values (unit discrepancy)
+impact.dataframe$Hb[impact.dataframe$Hb >= 50 & !is.na(impact.dataframe$Hb)] <- .1*impact.dataframe$Hb[impact.dataframe$Hb >= 50 & !is.na(impact.dataframe$Hb)]
+
+# Remove patients under the age of 18 from the study
+impact.dataframe <- impact.dataframe %>% filter(age >= 18)
+
+# Save cleaned dataset
+write.csv(impact.dataframe,'../impact_dataframe.csv',row.names = FALSE)
+```
+
+### Observe summary information of CENTER-TBI dataset
+```{r, message=FALSE, warning=FALSE}
+# Load function to fix IMPACT variable types in the dataframe
+source('functions/fix_impact_dataframe.R')
+
+# Load cleaned sample set
+impact.dataframe <- read.csv('../impact_dataframe.csv') %>% fix.impact.dataframe()
+
+# Produce table of summary information
+knitr::kable(summary(impact.dataframe[,names(impact.dataframe) != 'entity_id']))
+
+# Produce frequency barpolot of GOSE outcome labels
+barplot(prop.table(table(impact.dataframe$GOSE)),xlab = 'GOSE',ylab = 'Frequency',main = 'GOSE frequency distribution',ylim = c(0,.5))
+
+# Produce geometric density plots of all numeric IMPACT predictors
+impact.dataframe %>%
+  keep(is.numeric) %>%                     
+  gather() %>%                             
+  ggplot(aes(value)) +                     
+    facet_wrap(~ key, scales = "free") +   
+    geom_density()   
+```
+
+## III. Create folds for stratified repeated cross-validation
+
+```{r, message=FALSE, warning=FALSE, eval = FALSE}
+# Load function to fix IMPACT variable types in the dataframe
+source('functions/fix_impact_dataframe.R')
+
+# Load cleaned sample set labels for stratified cross-validation sampling
+impact.dataframe <- read.csv('../impact_dataframe.csv') %>% fix.impact.dataframe()
+
+# Use caret function to create repeated, cross-validation fold partitions:
+set.seed(2020)
+n.repeats <- 20 # set number of repeats
+n.folds <- 5 # set number of folds
+
+testing.folds <- vector(mode = 'list')
+for (i in 1:n.repeats){
+  curr.repeat.name <- paste0('Repeat',sprintf("%02d",i))
+  curr.testing.folds <-
+    createFolds(
+      as.factor(impact.dataframe$GOSE),
+      k = n.folds,
+      list = TRUE,
+      returnTrain = FALSE
+    )
+  testing.folds[[curr.repeat.name]] <- curr.testing.folds
+}
+
+# Save testing partitions as an RDS file
+saveRDS(testing.folds,'../testing_folds.rds')
+
+# Convert testing folds to dataframe format
+testing.folds.df <- as.data.frame(matrix(ncol=3,nrow=0))
+for (i in 1:length(testing.folds)){
+  curr.repeat <- testing.folds[[i]]
+  for (j in 1:length(curr.repeat)){
+    curr.fold <- curr.repeat[[j]]
+    testing.folds.df = rbind(testing.folds.df, data.frame(testIdx = curr.fold, GUPI = impact.dataframe$entity_id[curr.fold], repeat.no = i, fold.no = j))
+  }
+}
+write.csv(testing.folds.df,'../testing_folds.csv', row.names = FALSE)
+```
+
+## III. Calculate basic statistical information from clean predictor set
+### Table 1: Patient characteristics stratified by GOSE 
+```{r, message=FALSE, warning=FALSE, eval = FALSE}
+# Load function to fix IMPACT variable types in the dataframe
+source('functions/fix_impact_dataframe.R')
+
+# Load IMPACT variables dataframe and fix variable types
+impact.dataframe <- read.csv('../impact_dataframe.csv') %>% fix.impact.dataframe()
+
+# Group patients by GOSE scores and measure summary statistics
+pt.char.table <-
+  impact.dataframe %>% group_by(GOSE) %>% summarise(
+    n = n(),
+    medAge = median(age),
+    Q1Age = quantile(age, 0.25),
+    Q3Age = quantile(age, 0.75),
+    medGCSm = median(GCSm, na.rm = TRUE),
+    Q1GCSm = quantile(GCSm, 0.25, na.rm = TRUE),
+    Q3GCSm = quantile(GCSm, 0.75, na.rm = TRUE),
+    PercHypoxia = 100 * table(hypoxia)[2] / n(),
+    PercHTN = 100 * table(hypotension)[2] / n(),
+    medMarshall = median(marshall, na.rm = TRUE),
+    Q1Marshall = quantile(marshall, 0.25, na.rm = TRUE),
+    Q3Marshall = quantile(marshall, 0.75, na.rm = TRUE),
+    PerctSAH = table(tsah)[2] / sum(table(tsah)),
+    PercEDH = table(EDH)[2] / sum(table(EDH)),
+    meanGlu = mean(glu, na.rm = TRUE),
+    sdGlu = sd(glu, na.rm = TRUE),
+    meanHb = mean(Hb, na.rm = TRUE),
+    sdHb = sd(Hb, na.rm = TRUE),
+    notSAH = table(tsah)[2],
+    noEDH = table(EDH)[2],
+    noHypoxia = table(hypoxia)[2],
+    noHypotension = table(hypotension)[2],
+    noOneEye = table(unreactive_pupils)[2],
+    noTwoEyes = table(unreactive_pupils)[3],
+    percOneEye = 100 * table(unreactive_pupils)[2] / sum(table(unreactive_pupils)),
+    percTwoEyes = 100 * table(unreactive_pupils)[3] / sum(table(unreactive_pupils))
+  )
+
+pt.char.table <- t(pt.char.table)
+
+# Kruskal-Wallis rank sum test for glucose, age, and Hb
+glu.kw <- kruskal.test(glu ~ GOSE, data = impact.dataframe)
+glu.kw
+
+Hb.kw <- kruskal.test(Hb ~ GOSE, data = impact.dataframe)
+Hb.kw
+
+age.kw <- kruskal.test(age ~ GOSE, data = impact.dataframe)
+age.kw
+
+# Chi-Squared Tests for number of patients, GCSm, pupillary reactivity, hypoxia, hypotension, Marshall CT classification, tSAH, and EDH
+age.chi <- chisq.test(table(impact.dataframe$age,impact.dataframe$GOSE))
+gcsm.chi <- chisq.test(table(impact.dataframe$GCSm,impact.dataframe$GOSE))
+unreactive_pupils.chi <- chisq.test(table(impact.dataframe$unreactive_pupils,impact.dataframe$GOSE))
+hypoxia.chi <- chisq.test(table(impact.dataframe$hypoxia,impact.dataframe$GOSE))
+hypotension.chi <- chisq.test(table(impact.dataframe$hypotension,impact.dataframe$GOSE))
+marshall.chi <- chisq.test(table(impact.dataframe$marshall,impact.dataframe$GOSE))
+tsah.chi <- chisq.test(table(impact.dataframe$tsah,impact.dataframe$GOSE))
+EDH.chi <- chisq.test(table(impact.dataframe$EDH,impact.dataframe$GOSE))
+
+# Pairwise Wilcoxon Tests for predictors
+age.pw.wx <- pairwise.wilcox.test(impact.dataframe$age, impact.dataframe$GOSE,p.adjust.method = "BH")
+glu.pw.wx <- pairwise.wilcox.test(impact.dataframe$glu, impact.dataframe$GOSE,p.adjust.method = "BH")
+Hb.pw.wx <- pairwise.wilcox.test(impact.dataframe$Hb, impact.dataframe$GOSE,p.adjust.method = "BH")
+GCSm.pw.wx <- pairwise.wilcox.test(impact.dataframe$GCSm, impact.dataframe$GOSE,p.adjust.method = "BH")
+marshall.pw.wx <- pairwise.wilcox.test(impact.dataframe$marshall, impact.dataframe$GOSE,p.adjust.method = "BH")
+unreactive_pupils.pw.wx <- pairwise.wilcox.test(as.integer(impact.dataframe$unreactive_pupils)-1, impact.dataframe$GOSE,p.adjust.method = "BH")
+
+hypoxia.pw.wx <- pairwise.wilcox.test(as.integer(impact.dataframe$hypoxia)-1, impact.dataframe$GOSE,p.adjust.method = "BH")
+hypotension.pw.wx <- pairwise.wilcox.test(as.integer(impact.dataframe$hypotension)-1, impact.dataframe$GOSE,p.adjust.method = "BH")
+tsah.pw.wx <- pairwise.wilcox.test(as.integer(impact.dataframe$tsah)-1, impact.dataframe$GOSE,p.adjust.method = "BH")
+EDH.pw.wx <- pairwise.wilcox.test(as.integer(impact.dataframe$EDH)-1, impact.dataframe$GOSE,p.adjust.method = "BH")
+
+```
+
+### Spearman correlations with GOSE
+```{r, message=FALSE, warning=FALSE, eval = FALSE}
+# Load IMPACT dataframe
+impact.dataframe <- read.csv('../impact_dataframe.csv')
+
+# Spearman  correlations of predictors with GOSE
+age.corr <- cor.test(impact.dataframe$age, impact.dataframe$GOSE, method = 'spearman', exact = FALSE)
+GCSm.corr <- cor.test(impact.dataframe$GCSm, impact.dataframe$GOSE, method = 'spearman', exact = FALSE)
+unreactive_pupils.corr <- cor.test(impact.dataframe$unreactive_pupils, impact.dataframe$GOSE, method = 'spearman', exact = FALSE)
+Hb.corr <- cor.test(impact.dataframe$Hb, impact.dataframe$GOSE, method = 'spearman', exact = FALSE)
+glu.corr <- cor.test(impact.dataframe$glu, impact.dataframe$GOSE, method = 'spearman', exact = FALSE)
+marshall.corr <- cor.test(impact.dataframe$marshall, impact.dataframe$GOSE, method = 'spearman', exact = FALSE)
+```

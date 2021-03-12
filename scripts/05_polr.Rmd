@@ -1,0 +1,387 @@
+---
+title: "Ordinal logistic regression model on CENTER-TBI dataset"
+author: 
+- Shubhayu Bhattacharyay
+- Ari Ercole
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+---
+<style type="text/css">
+.main-container {
+max-width: 1800px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+
+#### Test assumptions necessary for proportional odds ordinal logistic regression (POLR) and train POLR classifiers
+
+## I. Initialization
+
+### Import necessary libraries
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(MASS)
+library(Hmisc)
+library(reshape2)
+library(caret)
+library(Amelia)
+library(mice)
+library(bestNormalize)
+library(UBL)
+library(GGally)
+library(ggpubr)
+library(knitr)
+library(brant)
+library(car)
+library(mlr)
+```
+
+### Load repeated cross validation splits
+```{r message=FALSE, warning=FALSE}
+testing.folds <- readRDS('../testing_folds.rds')
+```
+
+## II. Training of proportional odds ordinal logistic regression models and subsequent prediction
+
+### Load imputations and train POLR models
+```{r eval = FALSE, message=FALSE, warning=FALSE}
+# Load function to fix variable types 
+source('functions/fix_tf_impact_dataframe.R')
+
+# Create new empty dataframes to store predictions across the folds
+polr.results.compiled <- as.data.frame(matrix(nrow = 0,ncol = 13))
+
+# Loop through repeated-CV folds and train + evaluate POLR models
+for (repeat.names in names(testing.folds)){
+  for (fold.names in names(testing.folds[[repeat.names]])){
+    # Load current normalized imputed training set
+    curr.norm.training.set <- read.csv(file.path('../repeated_cv',repeat.names,fold.names,'norm_train_dataframe.csv')) %>%
+      fix.tf.impact.dataframe()
+    
+    # Load current SMOTE'd, normalized imputed training set
+    curr.smote.norm.training.set <- read.csv(file.path('../repeated_cv',repeat.names,fold.names,'smote_norm_train_dataframe.csv')) %>%
+      fix.tf.impact.dataframe()
+    
+    # Train and save current POLR model without SMOTE
+    curr.polr.mdl.wo.SMOTE <- polr(GOSE ~ age + unreactive_pupils + GCSm + Hb + glu + hypoxia + hypotension + marshall + tsah + EDH, data = curr.norm.training.set, Hess=TRUE, method = "logistic")
+    
+    # Train and save current POLR model with SMOTE
+    curr.polr.mdl.w.SMOTE <- polr(GOSE ~ age + unreactive_pupils + GCSm + Hb + glu + hypoxia + hypotension + marshall + tsah + EDH, data = curr.smote.norm.training.set, Hess=TRUE, method = "logistic")
+    
+    # Create sub-directory to save trained models
+    dir.create(file.path('../repeated_cv',repeat.names,fold.names,'trained_models'),showWarnings = FALSE,recursive = TRUE)
+    
+    # Save current POLR model without SMOTE
+    saveRDS(curr.polr.mdl.wo.SMOTE, file.path('../repeated_cv',repeat.names,fold.names,'trained_models','polr_mdl.rds'))
+    
+    # Save current POLR model with SMOTE
+    saveRDS(curr.polr.mdl.w.SMOTE, file.path('../repeated_cv',repeat.names,fold.names,'trained_models','polr_smote_mdl.rds'))
+    
+    # Print status message
+    print(paste('Training of POLR on',repeat.names,fold.names,'completed'))
+    
+    # Load current imputation testing set and assign proper variable types
+    curr.norm.testing.set <- read.csv(file.path('../repeated_cv',repeat.names,fold.names,'norm_test_dataframe.csv')) %>% fix.tf.impact.dataframe()
+    
+    # Evaluate model (without SMOTE) on testing set
+    test.pred.probs <- as.data.frame(predict(curr.polr.mdl.wo.SMOTE, curr.norm.testing.set, type = "p"))
+    names(test.pred.probs) <- c('prob_GOSE_1', 'prob_GOSE_2_3', 'prob_GOSE_4', 'prob_GOSE_5', 'prob_GOSE_6','prob_GOSE_7','prob_GOSE_8')
+    true.labels <- curr.norm.testing.set$GOSE
+    pred.labels <- predict(curr.polr.mdl.wo.SMOTE, curr.norm.testing.set)
+    test.pred.labels <- data.frame(true.labels,pred.labels)
+    test.final.wo.SMOTE <- cbind(test.pred.labels,test.pred.probs)
+    
+    # Evaluate model (with SMOTE) on testing set
+    test.pred.probs <- as.data.frame(predict(curr.polr.mdl.w.SMOTE, curr.norm.testing.set, type = "p"))
+    names(test.pred.probs) <- c('prob_GOSE_1', 'prob_GOSE_2_3', 'prob_GOSE_4', 'prob_GOSE_5', 'prob_GOSE_6','prob_GOSE_7','prob_GOSE_8')
+    true.labels <- curr.norm.testing.set$GOSE
+    pred.labels <- predict(curr.polr.mdl.w.SMOTE, curr.norm.testing.set)
+    test.pred.labels <- data.frame(true.labels,pred.labels)
+    test.final.w.SMOTE <- cbind(test.pred.labels,test.pred.probs)
+    
+    # Add current fold information to final prediction dataframes and append to compiled result dataframe
+    test.final.wo.SMOTE$repeat.name <- repeat.names
+    test.final.wo.SMOTE$fold.name <- fold.names
+    test.final.wo.SMOTE$SMOTE <- 0
+    test.final.wo.SMOTE$entity_id <- curr.norm.testing.set$entity_id
+    
+    test.final.w.SMOTE$repeat.name <- repeat.names
+    test.final.w.SMOTE$fold.name <- fold.names
+    test.final.w.SMOTE$SMOTE <- 1
+    test.final.w.SMOTE$entity_id <- curr.norm.testing.set$entity_id
+    
+    polr.results.compiled <- rbind(polr.results.compiled, test.final.wo.SMOTE, test.final.w.SMOTE)
+    # Print status message
+    print(paste('Evaluation of POLR on',repeat.names,fold.names,'completed'))
+  }
+}
+
+# Save compiled POLR results (create new directory to save tuning results)
+dir.create('../repeated_cv/compiled_predictions',showWarnings = FALSE)
+write.csv(polr.results.compiled,'../repeated_cv/compiled_predictions/polr.csv',row.names = FALSE)
+```
+
+### Combine (pool) evaluation metrics across multiple imputations
+```{r eval = FALSE, message=FALSE, warning=FALSE}
+# Load compiled POLR results
+polr.results.compiled <- read.csv('../repeated_cv/compiled_predictions/polr.csv') %>%
+  mutate(true.labels = factor(true.labels),
+         pred.labels = factor(pred.labels))
+
+# Load bootstrapping IDs
+bootstrap.id.list <- readRDS('../repeated_cv/bootstrap_IDs.rds')
+
+# Calculate bootstrapped classification metrics and compile in dataframe
+compiled.bs.metrics <- as.data.frame(matrix(ncol = 5, nrow = 0))
+counter <- 0
+for (curr.bootstrap.ids in bootstrap.id.list){
+  counter <- counter + 1
+  
+  # Filter out in-sample values for current sample
+  in.sample.results <- polr.results.compiled %>% 
+    filter(entity_id %in% curr.bootstrap.ids) 
+  
+  # Group by SMOTE indicator and calculate compiled results
+  no.smote.cm <- confusionMatrix(in.sample.results$pred.labels[in.sample.results$SMOTE == 0],
+                                 in.sample.results$true.labels[in.sample.results$SMOTE == 0])
+  smote.cm <- confusionMatrix(in.sample.results$pred.labels[in.sample.results$SMOTE == 1],
+                              in.sample.results$true.labels[in.sample.results$SMOTE == 1])
+  
+  # Find optimal SMOTE choice for Accuracy
+  if (no.smote.cm$overall['Accuracy'] >= smote.cm$overall['Accuracy']){
+    opt.smote.Accuracy <- 0
+  } else {
+    opt.smote.Accuracy <- 1
+  }
+  
+  # Find optimal SMOTE choice for Cohen's Kappa
+  if (no.smote.cm$overall['Kappa'] >= smote.cm$overall['Kappa']){
+    opt.smote.Kappa <- 0
+  } else {
+    opt.smote.Kappa <- 1
+  }
+  
+  # Find optimal SMOTE choices for Sensitivity (per class and macro-averaged)
+  no.smote.Sensitivity <- c(no.smote.cm$byClass[,'Sensitivity'],mean(no.smote.cm$byClass[,'Sensitivity']))
+  smote.Sensitivity <- c(smote.cm$byClass[,'Sensitivity'],mean(smote.cm$byClass[,'Sensitivity']))
+  names(smote.Sensitivity)[length(smote.Sensitivity)] <- 'macro-averaged'
+  opt.smote.Sensitivity <- max.col(cbind('0'=no.smote.Sensitivity,'1'=smote.Sensitivity),ties.method="first") - 1
+  names(opt.smote.Sensitivity) <- names(smote.Sensitivity)
+  
+  # Find optimal SMOTE choices for Specificity (per class and macro-averaged)
+  no.smote.Specificity <- c(no.smote.cm$byClass[,'Specificity'],mean(no.smote.cm$byClass[,'Specificity']))
+  smote.Specificity <- c(smote.cm$byClass[,'Specificity'],mean(smote.cm$byClass[,'Specificity']))
+  names(smote.Specificity)[length(smote.Specificity)] <- 'macro-averaged'
+  opt.smote.Specificity <- max.col(cbind('0'=no.smote.Specificity,'1'=smote.Specificity),ties.method="first") - 1
+  names(opt.smote.Specificity) <- names(smote.Specificity)
+  
+  # Find optimal SMOTE choices for F1 (per class and macro-averaged)
+  no.smote.F1 <- no.smote.cm$byClass[,'F1']
+  no.smote.F1[is.na(no.smote.F1)] <- 0
+  no.smote.F1 <- c(no.smote.F1,mean(no.smote.F1))
+  smote.F1 <- smote.cm$byClass[,'F1']
+  smote.F1[is.na(smote.F1)] <- 0
+  smote.F1 <- c(smote.F1,mean(smote.F1))
+  names(smote.F1)[length(smote.F1)] <- 'macro-averaged'
+  opt.smote.F1 <- max.col(cbind('0'=no.smote.F1,'1'=smote.F1),ties.method="first") - 1
+  names(opt.smote.F1) <- names(smote.F1)
+  
+  # Compile optimal SMOTE indicators across different metrics
+  curr.bs.metrics <- as.data.frame(cbind(opt.smote.Sensitivity,opt.smote.Specificity,opt.smote.F1)) %>%
+    mutate(class = row.names(.)) %>%
+    pivot_longer(names_prefix = 'opt.smote.', names_to = 'metric', values_to = 'opt.SMOTE', cols = -class)
+  curr.bs.metrics <- rbind(curr.bs.metrics,
+                           data.frame(class = 'overall',metric='Accuracy',opt.SMOTE = opt.smote.Accuracy),
+                           data.frame(class = 'overall',metric='Kappa',opt.SMOTE = opt.smote.Kappa))
+  
+  # Filter out out-sample values for current sample and optimal SMOTE
+  out.sample.results <- polr.results.compiled %>% 
+    filter(!(entity_id %in% curr.bootstrap.ids)) 
+  
+  # Group by SMOTE indicator and calculate compiled results from out-samples
+  out.no.smote.cm <- confusionMatrix(out.sample.results$pred.labels[out.sample.results$SMOTE == 0],
+                                     out.sample.results$true.labels[out.sample.results$SMOTE == 0])
+  out.smote.cm <- confusionMatrix(out.sample.results$pred.labels[out.sample.results$SMOTE == 1],
+                                  out.sample.results$true.labels[out.sample.results$SMOTE == 1])
+  
+  
+  curr.bs.metrics$value = NA
+  curr.bs.metrics$bootstrap.idx = counter
+  
+  for (i in 1:nrow(curr.bs.metrics)){
+    if (curr.bs.metrics$opt.SMOTE[i] == 0){
+      if (curr.bs.metrics$class[i] == 'macro-averaged'){
+        curr.values <- out.no.smote.cm$byClass[,curr.bs.metrics$metric[i]]
+        curr.values[is.na(curr.values)] <- 0
+        curr.bs.metrics$value[i] <- mean(curr.values)
+      } else if (curr.bs.metrics$class[i] == 'overall'){
+        curr.bs.metrics$value[i] <- out.no.smote.cm$overall[curr.bs.metrics$metric[i]]
+      } else {
+        curr.bs.metrics$value[i] <- out.no.smote.cm$byClass[curr.bs.metrics$class[i],curr.bs.metrics$metric[i]]
+      }
+    } else {
+      if (curr.bs.metrics$class[i] == 'macro-averaged'){
+        curr.values <- out.smote.cm$byClass[,curr.bs.metrics$metric[i]]
+        curr.values[is.na(curr.values)] <- 0
+        curr.bs.metrics$value[i] <- mean(curr.values)
+      } else if (curr.bs.metrics$class[i] == 'overall'){
+        curr.bs.metrics$value[i] <- out.smote.cm$overall[curr.bs.metrics$metric[i]]
+      } else {
+        curr.bs.metrics$value[i] <- out.smote.cm$byClass[curr.bs.metrics$class[i],curr.bs.metrics$metric[i]]
+      }
+    }
+  }
+  
+  compiled.bs.metrics <- rbind(compiled.bs.metrics,curr.bs.metrics)
+  
+  if (counter %% 50 == 0){
+    print(paste(counter/10,'% completed for bootstrapped metrics'))
+  }
+}
+
+# Create directory to store compiled metrics
+dir.create('../metrics',showWarnings = FALSE)
+
+# Save compiled bootstrapped classification metrics
+write.csv(compiled.bs.metrics,'../metrics/polr_compiled_metrics.csv',row.names = FALSE)
+
+# Summarize classification metrics
+summarized.bs.metrics <- compiled.bs.metrics %>% 
+  group_by(metric,class) %>%
+  summarise(metric.value = mean(value),
+            lower.ci.value = quantile(value,.025),
+            upper.ci.value = quantile(value,.975),
+  )
+```
+
+### Bootstrap to calculate POLR AUCs and axes
+```{r eval = FALSE, message=FALSE, warning=FALSE}
+# Load compiled POLR results
+polr.results.compiled <- read.csv('../repeated_cv/compiled_predictions/polr.csv') %>%
+  mutate(true.labels = factor(true.labels),
+         pred.labels = factor(pred.labels))
+
+# Load bootstrapping IDs
+bootstrap.id.list <- readRDS('../repeated_cv/bootstrap_IDs.rds')
+
+# Load function to calculate AUCs
+source('./functions/multiclass_AUC.R')
+
+# Calculate bootstrapped classification metrics and compile in dataframe
+compiled.bs.aucs <- as.data.frame(matrix(ncol = 5, nrow = 0))
+compiled.bs.axes <- as.data.frame(matrix(ncol = 5, nrow = 0))
+counter <- 0
+for (curr.bootstrap.ids in bootstrap.id.list){
+  counter <- counter + 1
+  
+  # Filter out in-sample values for current sample
+  in.sample.results <- polr.results.compiled %>% 
+    filter(entity_id %in% curr.bootstrap.ids) 
+  
+  # Group by SMOTE indicator and calculate compiled AUCs on in-sample
+  in.sample.aucs <- rbind(multiclass.AUC(in.sample.results[in.sample.results$SMOTE == 0,]) %>%
+                            mutate(SMOTE = 0), 
+                          multiclass.AUC(in.sample.results[in.sample.results$SMOTE == 1,]) %>%
+                            mutate(SMOTE = 1))
+  
+  # Find optimal SMOTE choices for each class-specific and macro-averaged AUC values
+  curr.bs.aucs <- in.sample.aucs %>%
+    group_by(type, class) %>%
+    summarise(opt.SMOTE = SMOTE[which.max(value)])
+  
+  # Filter out out-sample values for current sample and optimal SMOTE
+  out.sample.results <- polr.results.compiled %>% 
+    filter(!(entity_id %in% curr.bootstrap.ids)) 
+  
+  any.no.smotes <- 0 %in% curr.bs.aucs$opt.SMOTE
+  any.smotes <- 1 %in% curr.bs.aucs$opt.SMOTE
+  
+  if (!any.smotes){
+    out.sample.output <- multiclass.AUC(out.sample.results[out.sample.results$SMOTE == 0,],axes = TRUE)
+    curr.curve.axes <- out.sample.output[[2]]
+    curr.bs.aucs <- left_join(curr.bs.aucs, out.sample.output[[1]], by = c('type','class'))
+  } else if (!any.no.smotes) {
+    out.sample.output <- multiclass.AUC(out.sample.results[out.sample.results$SMOTE == 1,],axes = TRUE)
+    curr.curve.axes <- out.sample.output[[2]]
+    curr.bs.aucs <- left_join(curr.bs.aucs, out.sample.output[[1]], by = c('type','class'))
+  } else {
+    no.smote.output <- multiclass.AUC(out.sample.results[out.sample.results$SMOTE == 0,],axes = TRUE)
+    no.smote.aucs <- no.smote.output[[1]]
+    no.smote.curve.axes <- no.smote.output[[2]]
+    
+    smote.output <- multiclass.AUC(out.sample.results[out.sample.results$SMOTE == 0,],axes = TRUE)
+    smote.aucs <- smote.output[[1]]
+    smote.curve.axes <- smote.output[[2]]
+    
+    curr.bs.aucs$value <- NA
+    curr.curve.axes <- as.data.frame(matrix(ncol = 4, nrow = 0))
+    
+    for (i in 1:nrow(curr.bs.aucs)){
+      if (curr.bs.aucs$opt.SMOTE[i] == 0){
+        curr.idx <- no.smote.aucs$class == curr.bs.aucs$class[i] & no.smote.aucs$type == curr.bs.aucs$type[i]
+        curr.bs.aucs$value[i] <- no.smote.aucs$value[curr.idx]
+        if (curr.bs.aucs$class[i] != 'macro-average'){
+          curr.curve.idx <- which(no.smote.curve.axes$class == curr.bs.aucs$class[i] &
+                                    no.smote.curve.axes$type == substr(curr.bs.aucs$type[i],3,5))
+          curr.curve.axes <- rbind(curr.curve.axes,no.smote.curve.axes[curr.curve.idx,])
+        }
+      } else {
+        curr.idx <- smote.aucs$class == curr.bs.aucs$class[i] & smote.aucs$type == curr.bs.aucs$type[i]
+        curr.bs.aucs$value[i] <- smote.aucs$value[curr.idx]
+        if (curr.bs.aucs$class[i] != 'macro-average'){
+          curr.curve.idx <- which(no.smote.curve.axes$class == curr.bs.aucs$class[i] &
+                                    no.smote.curve.axes$type == substr(curr.bs.aucs$type[i],3,5))
+          curr.curve.axes <- rbind(curr.curve.axes,no.smote.curve.axes[curr.curve.idx,])
+        }
+      }
+    }
+  }
+  
+  curr.bs.aucs$bootstrap.idx = counter
+  curr.curve.axes$bootstrap.idx = counter
+  
+  # Create directory to save current bootstrap AUCs
+  dir.create(file.path('../metrics/bootstrap_auc',sprintf('B%04d',counter)),recursive = TRUE,showWarnings = FALSE)
+  
+  # Save current bootstrap AUCs and curve axes in new directory
+  write.csv(curr.bs.aucs,file.path('../metrics/bootstrap_auc',sprintf('B%04d',counter),'polr_aucs.csv'),row.names = FALSE)
+  write.csv(curr.curve.axes,file.path('../metrics/bootstrap_auc',sprintf('B%04d',counter),'polr_roc_prc_axes.csv'),row.names = FALSE)
+  
+  compiled.bs.aucs <- rbind(compiled.bs.aucs,curr.bs.aucs)
+  compiled.bs.axes <- rbind(compiled.bs.axes,curr.curve.axes)
+  
+  if (counter %% 10 == 0){
+    print(paste(counter/10,'% completed for bootstrapped ROCs and PRCs'))
+  }
+}
+
+# Save compiled bootstrapped AUCs and curves
+write.csv(compiled.bs.aucs,'../metrics/polr_compiled_aucs.csv',row.names = FALSE)
+write.csv(compiled.bs.axes,'../metrics/polr_compiled_roc_prc_axes.csv',row.names = FALSE)
+
+# Summarize classification aucs
+summarized.bs.aucs <- compiled.bs.aucs %>% 
+  group_by(type,class) %>%
+  summarise(metric.value = mean(value),
+            lower.ci.value = quantile(value,.025),
+            upper.ci.value = quantile(value,.975),
+  )
+
+# Calculate mean and confidence intervals for the ROC and PR axes
+polr.plot.roc.pcr.axes <- compiled.bs.axes %>%
+  group_by(class, type, x) %>%
+  summarise(mean.y = mean(y,na.rm = TRUE),
+            lower.ci.y = quantile(y,.025,na.rm = TRUE),
+            upper.ci.y = quantile(y,.975,na.rm = TRUE))
+
+write.csv(polr.plot.roc.pcr.axes,
+          '../metrics/polr_compiled_plot_roc_prc_axes.csv',
+          row.names = FALSE)
+```

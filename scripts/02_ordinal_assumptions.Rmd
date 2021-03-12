@@ -1,0 +1,108 @@
+---
+title: "Check assumptions for ordinal and multinomial logistic regression model on CENTER-TBI dataset"
+author: 
+- Shubhayu Bhattacharyay
+- Ari Ercole
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_notebook:
+    toc: yes
+  html_document:
+    toc: yes
+    df_print: paged
+---
+<style type="text/css">
+.main-container {
+max-width: 1800px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+
+#### Test assumptions necessary for proportional odds ordinal logistic regression (POLR) and multinomial logistic regression classifiers
+
+## I. Initialization
+
+### Import necessary libraries
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(MASS)
+library(Hmisc)
+library(reshape2)
+library(caret)
+library(Amelia)
+library(mice)
+library(bestNormalize)
+library(UBL)
+library(GGally)
+library(ggpubr)
+library(knitr)
+library(brant)
+library(car)
+library(mlr)
+library(rms)
+```
+
+### Load imputation information
+```{r message=FALSE, warning=FALSE}
+# Load MICE object
+mi.impact <- readRDS('../mice_impact.rds')
+
+# Identify list of existing imputation directories
+imp.dirs <- list.files('../draws',pattern = 'imp*',include.dirs = TRUE,full.names = TRUE)
+imp.dirs <- imp.dirs[ file.info(imp.dirs)$isdir ]
+```
+
+### Load untransformed, cleaned dataset
+```{r message=FALSE, warning=FALSE}
+impact.dataframe <- read.csv('../impact_dataframe.csv')
+```
+
+## II. Examination of assumptions
+
+### Check for assumption of no multi-collinearity
+```{r message=FALSE, warning=FALSE, fig.width=7,fig.height=7}
+# Source function to fix IMPACT dataframe
+source('./functions/fix_impact_dataframe.R')
+
+# Produce overall correlation plot 
+corr.impact.dataframe <- read.csv('../impact_dataframe.csv') %>% 
+  fix.impact.dataframe() %>%
+  mutate(GCSm = as.factor(GCSm), marshall = as.factor(marshall))
+ggpairs(corr.impact.dataframe,columns = c(2,3,5:7,9:13))
+
+# Variance inflation factor (VIF) test
+vif.impact.dataframe <- read.csv('../impact_dataframe.csv')
+vif.fit <- lm(scale(GOSE) ~ age + unreactive_pupils + GCSm + Hb + glu + hypoxia + hypotension + marshall + tsah + EDH, data = vif.impact.dataframe)
+vif.test <- vif(vif.fit) %>% data.frame(variance.inflation.factors=.)
+knitr::kable(vif.test)
+```
+
+### Check for proportional odds assumption
+```{r message=FALSE, warning=FALSE, fig.width=10, fig.height=10}
+# Source function to fix IMPACT dataframe
+source('./functions/fix_impact_dataframe.R')
+
+# Reload IMPACT dataframe
+impact.dataframe <- read.csv('../impact_dataframe.csv') %>% fix.impact.dataframe() %>% mutate(unreactive_pupils = as.integer(unreactive_pupils) - 1)
+
+# Relabel patient type variable
+impact.dataframe$PatientType <- factor(impact.dataframe$PatientType,labels = c("ER","Admission","ICU"))
+
+# Examine ratio of log odds of GOSE outcomes across predictor values 
+source('functions/log_odds_GOSE.R')
+log.odds.table <- with(impact.dataframe, summary(GOSE ~ age + unreactive_pupils + GCSm + Hb + glu + hypoxia + hypotension + marshall + tsah + EDH, fun=log.odds.GOSE, na.include = FALSE))
+
+# Print matrix of log odds ratios
+print(log.odds.table)
+
+# Plot log odds ratios across IMPACT predictors
+plot(log.odds.table, which = 1:5, xlab = 'logit', main = '', width.factor=1.5,pch=0:14)
+
+# Apply Brant test to statistically test proportional odds assumption
+brant.fit <- polr(GOSE ~ age + unreactive_pupils + GCSm + Hb + glu + hypoxia + hypotension + marshall + tsah + EDH, data = impact.dataframe, Hess=TRUE, method = "logistic")
+
+# Print table of Brant test statistics
+kable(brant(brant.fit),caption = "Brant Test for Proportional Odds Assumption")
+```

@@ -1,0 +1,331 @@
+---
+title: "Calculate metrics and probability curve axes from DeepMN with bias-corrected bootstrapping"
+author: 
+- Shubhayu Bhattacharyay
+- Ari Ercole
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+---
+<style type="text/css">
+.main-container {
+max-width: 1800px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+
+## I. Initialization
+
+### Import necessary libraries
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(caret)
+```
+
+### Load repeated cross validation splits
+```{r message=FALSE, warning=FALSE}
+testing.folds <- readRDS('../testing_folds.rds')
+```
+
+## II. Combine (pool) evaluation metrics across multiple imputations for bootstrapping statistical analysis
+
+### Bootstrap to calculate DeepMN metrics
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+# Load compiled DeepMN results
+deepMN.results.compiled <- read.csv('../repeated_cv/compiled_predictions/deepMN.csv') %>%
+  rename(true.labels = true_labels,
+         pred.labels = pred_labels) %>%
+  mutate(true.labels = factor(true.labels),
+         pred.labels = factor(pred.labels))
+
+# Load banned tuning indices from BBCD-CV
+deepMN.banned.tuning.indices <- read.csv('../repeated_cv/deepMN_banned_tuning_indices.csv')
+
+# Determine number of banned classes per tuning index and filter out completely removed indices
+totally.banned.indices = as.data.frame(table(deepMN.banned.tuning.indices$tune_idx)) %>%
+  rename(tune_idx = Var1) %>%
+  filter(Freq == 8)
+
+# Remove totally banned indices from compiled prediction set
+deepMN.results.compiled <- deepMN.results.compiled %>%
+  filter(!(tune_idx %in% totally.banned.indices$tune_idx))
+
+# Identify list of unique viable tuning indices
+viable.tuning.indices <- unique(deepMN.results.compiled$tune_idx)
+
+# Load bootstrapping IDs
+bootstrap.id.list <- readRDS('../repeated_cv/bootstrap_IDs.rds')
+
+# Calculate bootstrapped classification metrics and compile in dataframe
+compiled.bs.metrics <- as.data.frame(matrix(ncol = 5, nrow = 0))
+counter <- 0
+for (curr.bootstrap.ids in bootstrap.id.list){
+  counter <- counter + 1
+  
+  # Filter out in-sample values for current sample and remove totally banned indices
+  in.sample.results <- deepMN.results.compiled %>% 
+    filter(entity_id %in% curr.bootstrap.ids)
+  
+  # Create dataframe of compiled metrics (per viable tuning index) to determine optimal tuning index in current bootstrap set:
+  curr.in.sample.bs.metrics <- as.data.frame(matrix(ncol = 4, nrow = 0))
+  for (curr.tune_idx in viable.tuning.indices){
+    curr.tune.cm <-
+      confusionMatrix(in.sample.results$pred.labels[in.sample.results$tune_idx == curr.tune_idx],
+                      in.sample.results$true.labels[in.sample.results$tune_idx == curr.tune_idx])
+    curr.Accuracy <- curr.tune.cm$overall['Accuracy']
+    curr.Kappa <- curr.tune.cm$overall['Kappa']
+    curr.Sensitivity <- c(curr.tune.cm$byClass[,'Sensitivity'],mean(curr.tune.cm$byClass[,'Sensitivity']))
+    names(curr.Sensitivity)[length(curr.Sensitivity)] <- 'macro-averaged'
+    curr.Specificity <- c(curr.tune.cm$byClass[,'Specificity'],mean(curr.tune.cm$byClass[,'Specificity']))
+    names(curr.Specificity)[length(curr.Specificity)] <- 'macro-averaged'
+    curr.F1 <- curr.tune.cm$byClass[,'F1']
+    curr.F1[is.na(curr.F1)] <- 0
+    curr.F1 <- c(curr.F1,mean(curr.F1))
+    names(curr.F1)[length(curr.F1)] <- 'macro-averaged'
+    curr.tune.metrics <- data.frame(cbind(curr.Sensitivity,curr.Specificity,curr.F1)) %>%
+      mutate(class = row.names(.)) %>%
+      pivot_longer(cols = -class, names_prefix = 'curr.', names_to = 'metric')
+    curr.tune.metrics <- rbind(curr.tune.metrics,
+                               data.frame(class = 'overall',metric='Accuracy',value = curr.Accuracy),
+                               data.frame(class = 'overall',metric='Kappa',value = curr.Kappa))
+    curr.tune.metrics$tune_idx <- curr.tune_idx
+    curr.in.sample.bs.metrics <- rbind(curr.in.sample.bs.metrics, curr.tune.metrics)
+  }
+  curr.bs.opt.tune.idx <- curr.in.sample.bs.metrics %>%
+    group_by(metric, class) %>%
+    summarise(opt.value = max(value),
+              tune_idx = tune_idx[which.max(value)])
+  
+  # Viable optimal tuning indices
+  curr.opt.viable.tuning.indices <- unique(curr.bs.opt.tune.idx$tune_idx)
+  
+  # Filter out out-sample values for current sample and optimal SMOTE
+  out.sample.results <- deepMN.results.compiled %>% 
+    filter(!(entity_id %in% curr.bootstrap.ids)) %>%
+    filter(tune_idx %in% curr.opt.viable.tuning.indices)
+  
+  # Iterate through viable topimal tuning indices and calculate approprate metrics (L_b) in current bootstrap out-sample set
+  curr.out.sample.bs.metrics <- as.data.frame(matrix(ncol = 4, nrow = 0))
+  for (curr.tune_idx in curr.opt.viable.tuning.indices){
+    
+    curr.tune.cm <-
+      confusionMatrix(out.sample.results$pred.labels[out.sample.results$tune_idx == curr.tune_idx],
+                      out.sample.results$true.labels[out.sample.results$tune_idx == curr.tune_idx])
+    
+    curr.Accuracy <- curr.tune.cm$overall['Accuracy']
+    curr.Kappa <- curr.tune.cm$overall['Kappa']
+    curr.Sensitivity <- c(curr.tune.cm$byClass[,'Sensitivity'],mean(curr.tune.cm$byClass[,'Sensitivity']))
+    names(curr.Sensitivity)[length(curr.Sensitivity)] <- 'macro-averaged'
+    curr.Specificity <- c(curr.tune.cm$byClass[,'Specificity'],mean(curr.tune.cm$byClass[,'Specificity']))
+    names(curr.Specificity)[length(curr.Specificity)] <- 'macro-averaged'
+    curr.F1 <- curr.tune.cm$byClass[,'F1']
+    curr.F1[is.na(curr.F1)] <- 0
+    curr.F1 <- c(curr.F1,mean(curr.F1))
+    names(curr.F1)[length(curr.F1)] <- 'macro-averaged'
+    
+    curr.tune.metrics <- data.frame(cbind(curr.Sensitivity,curr.Specificity,curr.F1)) %>%
+      mutate(class = row.names(.)) %>%
+      pivot_longer(cols = -class, names_prefix = 'curr.', names_to = 'metric')
+    curr.tune.metrics <- rbind(curr.tune.metrics,
+                               data.frame(class = 'overall',metric='Accuracy',value = curr.Accuracy),
+                               data.frame(class = 'overall',metric='Kappa',value = curr.Kappa))
+    curr.tune.metrics$tune_idx <- curr.tune_idx
+    
+    
+    combos.to.keep <- curr.bs.opt.tune.idx[curr.bs.opt.tune.idx$tune_idx == curr.tune_idx,c('metric','class')]
+    curr.out.sample.bs.metrics <- rbind(curr.out.sample.bs.metrics, dplyr::left_join(combos.to.keep, curr.tune.metrics, by = c('metric','class')))
+  }
+  
+  curr.out.sample.bs.metrics$bs.idx <- counter
+  compiled.bs.metrics <- rbind(compiled.bs.metrics,curr.out.sample.bs.metrics)
+  
+  if (counter %% 50 == 0){
+    print(paste(counter/10,'% completed for bootstrapped metrics'))
+  }
+}
+
+# Create directory to store compiled metrics
+dir.create('../metrics',showWarnings = FALSE)
+
+# Save compiled bootstrapped classification metrics
+write.csv(compiled.bs.metrics,'../metrics/deepMN_compiled_metrics.csv',row.names = FALSE)
+
+# Summarize classification metrics
+summarized.bs.metrics <- compiled.bs.metrics %>% 
+  group_by(metric,class) %>%
+  summarise(metric.value = mean(value),
+            lower.ci.value = quantile(value,.025),
+            upper.ci.value = quantile(value,.975),
+  )
+```
+
+### Bootstrap to calculate DeepMN AUCs and axes
+```{r eval=FALSE, message=FALSE, warning=FALSE}
+
+# Load compiled DeepMN results
+deepMN.results.compiled <- read.csv('../repeated_cv/compiled_predictions/deepMN.csv') %>%
+  rename(true.labels = true_labels,
+         pred.labels = pred_labels) %>%
+  mutate(true.labels = factor(true.labels),
+         pred.labels = factor(pred.labels))
+
+# Load banned tuning indices from BBCD-CV
+deepMN.banned.tuning.indices <- read.csv('../repeated_cv/deepMN_banned_tuning_indices.csv')
+
+# Determine number of banned classes per tuning index and filter out completely removed indices
+totally.banned.indices = as.data.frame(table(deepMN.banned.tuning.indices$tune_idx)) %>%
+  rename(tune_idx = Var1) %>%
+  filter(Freq == 8)
+
+# Remove totally banned indices from compiled prediction set
+deepMN.results.compiled <- deepMN.results.compiled %>%
+  filter(!(tune_idx %in% totally.banned.indices$tune_idx))
+
+# Identify list of unique viable tuning indices
+viable.tuning.indices <- unique(deepMN.results.compiled$tune_idx)
+
+# Load bootstrapping IDs
+bootstrap.id.list <- readRDS('../repeated_cv/bootstrap_IDs.rds')
+
+# Create dataframe of all possible combinations of viable tuning index and class
+viable.tuning.combos <- expand.grid(viable.tuning.indices,c('1','3','4','5','6','7','8','macro-averaged')) %>%
+  rename(tune_idx = Var1,
+         class = Var2)
+
+# Remove all rows in `viable.tuning.combos` that correspond to rows in the dataframe of banned combinations
+viable.tuning.combos <- dplyr::anti_join(viable.tuning.combos,deepMN.banned.tuning.indices,by = c('tune_idx','class'))
+
+# Load function to calculate AUCs
+source('./functions/singleclass_AUC.R')
+
+# Calculate bootstrapped classification metrics and compile in dataframe
+compiled.bs.aucs <- as.data.frame(matrix(ncol = 5, nrow = 0))
+compiled.bs.axes <- as.data.frame(matrix(ncol = 5, nrow = 0))
+counter <- 0
+for (curr.bootstrap.ids in bootstrap.id.list){
+  counter <- counter + 1
+  
+  # Filter out in-sample values for current sample
+  in.sample.results <- deepMN.results.compiled %>% 
+    filter(entity_id %in% curr.bootstrap.ids) 
+  
+  in.sample.aucs <- as.data.frame(matrix(ncol=4,nrow=0))
+  
+  for (curr.viable.combo.row in 1:nrow(viable.tuning.combos)){
+    
+    curr.viable.tune_idx <- viable.tuning.combos$tune_idx[curr.viable.combo.row]
+    curr.viable.class <- viable.tuning.combos$class[curr.viable.combo.row]
+    
+    # First check if current `curr.viable.combo.row` is unique for its class. If so, we can skip its evaluation to save time
+    if (sum(viable.tuning.combos$class == curr.viable.class) == 1){
+      temp.df.for.append <- data.frame(class = curr.viable.class,
+                                       tune_idx = curr.viable.tune_idx, 
+                                       type = c('auroc','auprc'),
+                                       value = NA)
+      in.sample.aucs <- rbind(in.sample.aucs, temp.df.for.append)
+      next
+    } else {
+      temp.df.for.append <- singleclass.AUC(in.sample.results[in.sample.results$tune_idx == curr.viable.tune_idx,], 
+                                            specific.class = as.character(curr.viable.class),
+                                            axes = FALSE) %>%
+        mutate(tune_idx = curr.viable.tune_idx)
+      in.sample.aucs <- rbind(in.sample.aucs, temp.df.for.append)
+    }
+  }
+  
+  # Replace NaNs with arbitrarily max number to pass maximum check
+  in.sample.aucs$value[is.na(in.sample.aucs$value)] <- 1
+  
+  # Find optimal tuning configuration for each class-specific and macro-averaged AUC values
+  curr.bs.aucs <- in.sample.aucs %>%
+    group_by(type, class) %>%
+    summarise(tune_idx = tune_idx[which.max(value)])
+  
+  # Viable optimal tuning indices
+  curr.opt.viable.tuning.indices <- unique(curr.bs.aucs$tune_idx)
+  
+  # Filter out out-sample values for current sample and optimal SMOTE
+  out.sample.results <- deepMN.results.compiled %>% 
+    filter(!(entity_id %in% curr.bootstrap.ids)) %>%
+    filter(tune_idx %in% curr.opt.viable.tuning.indices)
+  
+  # Iterate through `curr.opt.viable.tuning.indices` to calculate AUCs and ROC/PRC axes
+  curr.curve.axes <- as.data.frame(matrix(ncol = 4, nrow = 0))
+  curr.bs.aucs$value <- NA
+  for (curr.tune_idx in curr.opt.viable.tuning.indices){
+    curr.tune.curr.bs.aucs <- curr.bs.aucs %>% filter(tune_idx == curr.tune_idx)
+    curr.classes <- unique(curr.tune.curr.bs.aucs$class)
+    for (spec.class in curr.classes){
+      curr.types <- curr.tune.curr.bs.aucs$type[curr.tune.curr.bs.aucs$class == spec.class]
+      if (spec.class == 'macro-averaged'){
+        curr.class.aucs <- singleclass.AUC(out.sample.results[out.sample.results$tune_idx == curr.tune_idx,],
+                                       types = curr.types,
+                                       specific.class = as.character(spec.class),
+                                       axes = FALSE) 
+        for (spec.type in curr.types){
+          curr.bs.idx <-  curr.bs.aucs$class == spec.class & curr.bs.aucs$type == spec.type
+          curr.bs.aucs$value[curr.bs.idx] <- curr.class.aucs$value[curr.class.aucs$type == spec.type]
+        }
+      } else {
+        curr.output <- singleclass.AUC(out.sample.results[out.sample.results$tune_idx == curr.tune_idx,],
+                                       types = curr.types,
+                                       specific.class = as.character(spec.class),
+                                       axes = TRUE) 
+        curr.class.aucs <- curr.output[[1]]
+        curr.class.curve.axes <- curr.output[[2]]
+        curr.curve.axes <- rbind(curr.curve.axes,curr.class.curve.axes)
+        for (spec.type in curr.types){
+          curr.bs.idx <-  curr.bs.aucs$class == spec.class & curr.bs.aucs$type == spec.type
+          curr.bs.aucs$value[curr.bs.idx] <- curr.class.aucs$value[curr.class.aucs$type == spec.type]
+        }
+      }
+    }
+  }
+  
+  curr.bs.aucs$bootstrap.idx = counter
+  curr.curve.axes$bootstrap.idx = counter
+  
+  # Create directory to save current bootstrap AUCs
+  dir.create(file.path('../metrics/bootstrap_auc',sprintf('B%04d',counter)),recursive = TRUE,showWarnings = FALSE)
+  
+  # Save current bootstrap AUCs and curve axes in new directory
+  write.csv(curr.bs.aucs,file.path('../metrics/bootstrap_auc',sprintf('B%04d',counter),'deepMN_aucs.csv'),row.names = FALSE)
+  write.csv(curr.curve.axes,file.path('../metrics/bootstrap_auc',sprintf('B%04d',counter),'deepMN_roc_prc_axes.csv'),row.names = FALSE)
+  
+  compiled.bs.aucs <- rbind(compiled.bs.aucs,curr.bs.aucs)
+  compiled.bs.axes <- rbind(compiled.bs.axes,curr.curve.axes)
+  
+  if (counter %% 10 == 0){
+    print(paste(counter/10,'% completed for bootstrapped ROCs and PRCs'))
+  }
+}
+
+# Save compiled bootstrapped AUCs and curves
+write.csv(compiled.bs.aucs,'../metrics/deepMN_compiled_aucs.csv',row.names = FALSE)
+write.csv(compiled.bs.axes,'../metrics/deepMN_compiled_roc_prc_axes.csv',row.names = FALSE)
+
+# Summarize classification aucs
+summarized.bs.aucs <- compiled.bs.aucs %>% 
+  group_by(type,class) %>%
+  summarise(metric.value = mean(value),
+            lower.ci.value = quantile(value,.025),
+            upper.ci.value = quantile(value,.975),
+  )
+
+# Calculate mean and confidence intervals for the ROC and PR axes
+deepMN.plot.roc.pcr.axes <- compiled.bs.axes %>%
+  group_by(class, type, x) %>%
+  summarise(mean.y = mean(y,na.rm = TRUE),
+            lower.ci.y = quantile(y,.025,na.rm = TRUE),
+            upper.ci.y = quantile(y,.975,na.rm = TRUE))
+
+write.csv(deepMN.plot.roc.pcr.axes,
+          '../metrics/deepMN_compiled_plot_roc_prc_axes.csv',
+          row.names = FALSE)
+```

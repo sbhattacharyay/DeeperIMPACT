@@ -1,0 +1,244 @@
+---
+title: "Multiple imputation, Box-Cox transforming, and SMOTE of CENTER-TBI dataset"
+author: 
+- Shubhayu Bhattacharyay
+- Ari Ercole
+date: "`r format(Sys.time(), '%d %B %Y')`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+  html_notebook:
+    toc: yes
+---
+<style type="text/css">
+.main-container {
+max-width: 1800px;
+margin-left: auto;
+margin-right: auto;
+}
+</style>
+
+## I. Initialization
+
+### Import necessary libraries
+```{r message=FALSE, warning=FALSE}
+# Libraries
+library(tidyverse)
+library(MASS)
+library(caret)
+library(Amelia)
+library(mice)
+library(UBL)
+library(bestNormalize)
+library(VIM)
+library(gridExtra)
+library(latex2exp)
+```
+
+### Load IMPACT dataframe
+```{r message=FALSE, warning=FALSE}
+# Load function to fix IMPACT variable types in the dataframe
+source('functions/fix_impact_dataframe.R')
+
+# Load cleaned sample set labels for stratified cross-validation sampling
+impact.dataframe <- read.csv('../impact_dataframe.csv') %>% fix.impact.dataframe()
+
+# Convert pupillary reactivity variable type to integer for imputation
+impact.dataframe$unreactive_pupils <- as.integer(impact.dataframe$unreactive_pupils) - 1
+
+# Produce table of summary information of Box-Cox transformed dataset
+knitr::kable(summary(impact.dataframe))
+```
+
+### Load testing folds for repeated cross-validation splits
+```{r message=FALSE, warning=FALSE}
+testing.folds <- readRDS('../testing_folds.rds')
+```
+
+## I. Multiple imputation and evaluation of assumptions
+
+### Perform multiple imputation with chained equations
+```{r eval = FALSE, message=FALSE, warning=FALSE}
+# Remove entity ID and GOSE as predictors for MICE
+pred.matrix <- make.predictorMatrix(impact.dataframe)
+pred.matrix['GOSE',] <- 0
+pred.matrix[,'GOSE'] <- 0
+pred.matrix['entity_id',] <- 0
+pred.matrix[,'entity_id'] <- 0
+
+# Run model through MICE multiple imputation package
+mi.impact <-
+  mice(
+    impact.dataframe,
+    predictorMatrix = pred.matrix,
+    m = length(testing.folds) * length(testing.folds[[1]]),
+    maxit = 30,
+    seed = 2020,
+    method = 'pmm',
+    printFlag = TRUE
+  )
+
+# Save mice object
+saveRDS(mi.impact,'../mice_impact.rds')
+```
+
+### Observe diagnostic information of the imputation
+```{r message=FALSE, warning=FALSE}
+# Load mice object
+mi.impact <- readRDS('../mice_impact.rds')
+
+# View mean and standard deviation iteration plots for MICE
+plot(mi.impact)
+
+# Compare distributions of imputed variables against their true distributions
+stripplot(mi.impact, Hb~.imp)
+stripplot(mi.impact, glu~.imp)
+
+# Observe imputation densities
+densityplot(mi.impact)
+bwplot(mi.impact)
+```
+
+### Save imputed dataframes into proper directories
+```{r eval = FALSE, message=FALSE, warning=FALSE}
+# Names of repeats
+repeat.names <- names(testing.folds)
+
+# Names of folds
+fold.names <- names(testing.folds[[1]])
+
+# Create grid dataframe of all identifying names of folds
+repeat.fold.names <- expand.grid(repeat.names,fold.names)
+names(repeat.fold.names) <- c('repeat.name','fold.name')
+
+# Create directory to store repeated-CV dataframes
+dir.create('../repeated_cv',showWarnings = FALSE)
+
+# Save multiple imputations as csv files into respective directories
+for (i in  1:mi.impact$m){
+  # Load current imputation
+  curr.imp <- complete(mi.impact, action = i)
+  
+  # Get indexes of current repetition and fold
+  curr.test.split <- testing.folds[[repeat.fold.names$repeat.name[i]]][[repeat.fold.names$fold.name[i]]]
+  
+  # Create directory for current repetition and fold
+  dir.create(file.path('../repeated_cv',
+                       repeat.fold.names$repeat.name[i],
+                       repeat.fold.names$fold.name[i]),
+             showWarnings = FALSE,
+             recursive = TRUE)
+  
+  # Save full imputed dataset
+  write.csv(curr.imp,
+            file = file.path('../repeated_cv',
+                             repeat.fold.names$repeat.name[i],
+                             repeat.fold.names$fold.name[i],
+                             'full_imputed_dataframe.csv'),
+            row.names = FALSE)
+  
+  # Save imputed training dataset
+  write.csv(curr.imp[-curr.test.split,],
+            file = file.path('../repeated_cv',
+                             repeat.fold.names$repeat.name[i],
+                             repeat.fold.names$fold.name[i],
+                             'train_dataframe.csv'),
+            row.names = FALSE)
+  
+  # Save imputed testing dataset
+  write.csv(curr.imp[curr.test.split,],
+            file = file.path('../repeated_cv',
+                             repeat.fold.names$repeat.name[i],
+                             repeat.fold.names$fold.name[i],
+                             'test_dataframe.csv'),
+            row.names = FALSE)
+  
+  print(paste('Imputation no.',i,'complete'))
+}
+```
+
+## III. Box-Cox transform to normalize and scale dataset
+
+### Perform Box-Cox transformation to normalize training and testing datasets and then scale data
+```{r eval = FALSE, echo = TRUE, message=FALSE, warning = FALSE, fig.height=10, fig.width=10}
+# Load function to fix IMPACT variable types in the dataframe
+source('functions/fix_impact_dataframe.R')
+
+# Load testing folds for repeated cross-validation
+testing.folds <- readRDS('../testing_folds.rds')
+
+# Identify columns to undergo Box-Cox normalization
+bc.columns <- c('age','GCSm','Hb','glu','marshall')
+
+# Initialize empty lists to store Box-Cox models
+bc <- vector(mode = 'list')
+
+# Loop through repeated-CV folds, train Box-Cox models, and transform predictor datasets
+for (repeat.names in names(testing.folds)){
+  for (fold.names in names(testing.folds[[repeat.names]])){
+    # Load current imputed training set
+    curr.training.set <- read.csv(file.path('../repeated_cv',repeat.names,fold.names,'train_dataframe.csv'))
+
+    # Load current imputed testing set
+    curr.testing.set <- read.csv(file.path('../repeated_cv',repeat.names,fold.names,'test_dataframe.csv'))
+    
+    for (curr.col in bc.columns){
+      # Train boxcox model on current training set
+      curr.bc <- boxcox(curr.training.set[,curr.col],
+                        standardize = TRUE)
+      # Replace training set values
+      curr.training.set[,curr.col] <- curr.bc$x.t
+      # Replace testing set values
+      curr.testing.set[,curr.col] <- predict(curr.bc, newdata = curr.testing.set[,curr.col])
+      # Store current box.cox object in compiling list
+      bc[[repeat.names]][[fold.names]][[curr.col]] <- curr.bc
+    }
+    
+    # Store box-coxed dataframes into respective fold directories
+    write.csv(curr.training.set,file.path('../repeated_cv',repeat.names,fold.names,'norm_train_dataframe.csv'),row.names = FALSE)
+    write.csv(curr.testing.set,file.path('../repeated_cv',repeat.names,fold.names,'norm_test_dataframe.csv'), row.names = FALSE)
+    print(paste(repeat.names,fold.names,'complete.'))
+  }
+}
+
+# Save Box-Cox transformation object list
+saveRDS(bc,'../repeated_cv/box_cox.rds')
+```
+
+## IV. Synthetic Minority Oversampling Technique
+
+### Perform Synthetic Minority Oversampling Technique (SMOTE) to rectify class imbalance as a hyperparameter during training
+```{r eval = FALSE, message=FALSE, warning=FALSE}
+# Load function to fix variable types of pre-SMOTE'd dataset
+source('functions/fix_smote_impact_dataframe.R')
+
+# Load testing folds for repeated cross-validation
+testing.folds <- readRDS('../testing_folds.rds')
+
+# Loop through repeated-CV folds and apply SMOTE function to balance GOSE distributions in normalized training sets
+for (repeat.names in names(testing.folds)){
+  for (fold.names in names(testing.folds[[repeat.names]])){
+    # Load current normalized imputed training set and remove non-IMPACT predictors
+    curr.norm.training.set <- read.csv(file.path('../repeated_cv',repeat.names,fold.names,'norm_train_dataframe.csv')) %>%
+      fix.smote.impact.dataframe() %>%
+      dplyr::select(-c(entity_id,PatientType,GCS))
+    
+  # Print original GOSE class distribution
+  print('Original GOSE class distribution in training set:')
+  print(table(curr.norm.training.set$GOSE))
+  
+  # Apply SMOTE on training data with heterogeneous value difference metric
+  curr.smote.norm.training.set <- SmoteClassif(GOSE ~ age + unreactive_pupils + GCSm + Hb + glu + hypoxia + hypotension + marshall + tsah + EDH,curr.norm.training.set,dist = "HVDM")
+  
+  # Print SMOTE'd GOSE class distribution
+  print('SMOTEd GOSE class distribution in training set:')
+  print(table(curr.smote.norm.training.set$GOSE))
+  
+  # Save SMOTE'd training data
+  write.csv(curr.smote.norm.training.set,
+            file.path('../repeated_cv',repeat.names,fold.names,'smote_norm_train_dataframe.csv'),
+            row.names = FALSE)
+  }
+}
+```
