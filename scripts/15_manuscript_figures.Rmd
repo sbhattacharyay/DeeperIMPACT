@@ -523,7 +523,7 @@ plt.labels[9] <- "tSAH"
 # Produce both barplots of missing variables and combinations plot
 miss.aggr <- aggr(plot.impact.dataframe,numbers=TRUE,labels = plt.labels)
 ```
-## VII. Supplementary Figure 2: Effect of optimized Box-Cox transformation and standardization on distributions of numerical and ordinal variables
+## VIII. Supplementary Figure 2: Effect of optimized Box-Cox transformation and standardization on distributions of numerical and ordinal variables
 ```{r message=FALSE, warning=FALSE, fig.width=6.5, fig.height=4.5}
 # Load function to fix IMPACT variable types in the dataframe
 source('functions/fix_impact_dataframe.R')
